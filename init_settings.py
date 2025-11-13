@@ -45,12 +45,15 @@ def get_default_settings():
     settings['quot']['detect']['t'] = 20.0 ## likelihood ratio testing the model that the window contains a spot vs doesn't
     '''
     
+    ### note that i often get error flags for my spot localization, which means the spot intensity is below the background.
+    ### that happens when spots have locally high background, or when the background varies a lot between files.
+    ### i dont think it matters... the "error_flag=1" spots still seem real. The actual spot calling is all based on shape, not intensity
     settings['quot']['localize'] = {}
     settings['quot']['localize']['method'] = 'ls_int_gaussian'
     settings['quot']['localize']['window_size'] = 15 ## window size of 7 was bad. 11 is decent. 15 was best by a hair.
     settings['quot']['localize']['sigma'] = 2.5 
     settings['quot']['localize']['ridge'] = 0.00001
-    settings['quot']['localize']['max_iter'] = 30
+    settings['quot']['localize']['max_iter'] = 50
     settings['quot']['localize']['damp'] = 1 # higher damp means faster convergence
     #settings['quot']['localize']['camera_gain'] = 100
     settings['quot']['localize']['camera_bg'] = 100
@@ -59,9 +62,9 @@ def get_default_settings():
     settings['quot']['track']['method'] = 'euclidean' ## conservative is too conservative. euclidean should match trackmate
     settings['quot']['track']['pixel_size_um'] = 0.11
     settings['quot']['track']['frame_interval'] = 0.006 ## frame interval in seconds
-    settings['quot']['track']['search_radius'] = 1.6 ## linking distance in microns
+    settings['quot']['track']['search_radius'] = 1.2 ## linking distance in microns
     settings['quot']['track']['max_blinks'] = 0
-    settings['quot']['track']['min_I0'] = 0.0 ## "spot intensity above background." might be a hard parameter to tune
+    settings['quot']['track']['min_I0'] = 100.0 ## "spot intensity above background." might be a hard parameter to tune
     settings['quot']['track']['scale'] = 1.0
     
     '''
