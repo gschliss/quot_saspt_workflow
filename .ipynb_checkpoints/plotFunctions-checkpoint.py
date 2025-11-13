@@ -120,7 +120,7 @@ def generate_plots(MLE_df , posterior_plot_df , all_posteriors , settings , show
         ax_hist.hist(np.log10(sm_MLE['MLE_D']) , bins = np.linspace(-2,2,settings['plot']['nbins']) , density = True , color="#D28F8F");
 
         for f, group in normalized_df.groupby('file'):
-            ax_hist.plot(np.log10(group['D']), 50 * group['density_norm'], linewidth=1.5, color='gainsboro')
+            ax_hist.plot(np.log10(group['D']), 50 * group['density_norm'], linewidth=1.5, color='gainsboro' , alpha = 0.4)
 
         ax_hist.plot(np.log10(sm_df['D']) , 50 * sm_df['density'] , linewidth = 1.5 , color = 'black')
 

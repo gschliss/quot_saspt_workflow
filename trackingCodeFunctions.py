@@ -65,10 +65,10 @@ def identify_missing_filewise(settings , force = False):
             missing_files[key] = missing
 
     if missing_files:
-        print("\nMissing files:")
-        for key, files in missing_files.items():
-            for f in files:
-                print(f"  {key}: {f}")
+        print("\nMissing files.")
+        #for key, files in missing_files.items():
+        #    for f in files:
+        #        print(f"  {key}: {f}")
     else:
         print("\nAll files exist.\n")
 
