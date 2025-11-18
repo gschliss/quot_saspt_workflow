@@ -1,0 +1,26 @@
+## settings_override.yaml
+## analyize_directory will look at this to load over-rides to the default tracking parameters
+## this file is optional, but will likley be used for SlowSPT to explicitly specify things like the linking distance or threshold quality
+
+
+analysis: "2025_05_15"
+io:
+  code_directory : /home/gschliss/software/spt_tracking_code/quot_workflow/clean_workflow/
+  python_location : /lab/tambora_li/Gavin/conda_env_dir/saspt_env/bin/python3
+  split_dimension : 200
+plot:
+  ylim : [ 0 , 2.5 ]
+  n_bins : 50
+  barGraphBreaks : [0 , 0.05 , 0.35 , 2 , 100]
+  barGraphLabels : ['Matrix' , 'Receptor' , 'Membrane' , 'Free']
+  mult_on_sd : 1.0
+saspt:
+  focal_depth : 0.1
+  splitsize : 5
+quot:
+  detect:
+    t : 25.0
+  track:
+    min_I0 : 200.0
+    search_radius : 1.1
+
