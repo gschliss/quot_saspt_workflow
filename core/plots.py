@@ -1115,8 +1115,9 @@ def aggregate_bleaching_data(
         rollingMLE["ur_trajectory"].isin(valid_trajectories)
     ].copy()
 
-    bc = pd.DataFrame()
+    bc_rows: list[pd.DataFrame] = []
     prev_open_image = ""
+    img_stack = None
 
     unique_trajs = np.unique(rollingMLE_filtered["ur_trajectory"])
     n = min(n_particles, len(unique_trajs))
@@ -1130,19 +1131,18 @@ def aggregate_bleaching_data(
         try:
             file_pattern = this_traj["ur_trajectory"].replace(
                 r"_traj::\d+", ".nd2", regex=True
-            )[0]
+            ).iloc[0]
             image_file = glob.glob(
                 os.path.join(settings["io"]["data_directory"], file_pattern)
             )[0]
             if image_file != prev_open_image:
-                img = pims.open(image_file)
-                img_stack = np.array(img)
+                img_stack = np.array(pims.open(image_file))
                 prev_open_image = image_file
-            bc = pd.concat([bc, bleaching_curve(img, this_traj)])
-        except Exception:
-            print("Caught an error")
+            bc_rows.append(bleaching_curve(img_stack, this_traj))
+        except Exception as exc:
+            print(f"  [bleaching] skipping {traj_id}: {exc}")
 
-    return bc
+    return pd.concat(bc_rows, ignore_index=True) if bc_rows else pd.DataFrame()
 
 
 def plot_bleaching_curves(settings: dict, bc: pd.DataFrame) -> None:
@@ -1256,13 +1256,13 @@ def generate_movies(
     for traj_id in sampled_trajs:
         this_traj, boundingBox = isolate_traj(rollingMLE_filtered, traj_id)
         output_filename = os.path.join(
-            output_dirname, f"{this_traj['ur_trajectory'][0]}.mp4"
+            output_dirname, f"{this_traj['ur_trajectory'].iloc[0]}.mp4"
         )
 
         try:
             file_pattern = this_traj["ur_trajectory"].replace(
                 r"_traj::\d+", ".nd2", regex=True
-            )[0]
+            ).iloc[0]
             matches = glob.glob(
                 os.path.join(settings["io"]["data_directory"], file_pattern)
             )

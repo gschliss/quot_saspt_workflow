@@ -103,9 +103,6 @@ def run_saspt(traj_csv: str, settings: dict) -> None:
     spots = pd.read_csv(traj_csv)
 
     # Keep all trajectories at this step (no length filter yet)
-    counts = spots["trajectory"].value_counts()
-    valid_traj = counts[counts >= 0].index
-    spots = spots[spots["trajectory"].isin(valid_traj)]
 
     # Filter trajectories with low mean intensity
     spots = spots.groupby("trajectory").filter(
@@ -204,9 +201,6 @@ def run_rolling_windows(traj_csv: str, settings: dict) -> pd.DataFrame:
     df["ur_trajectory"] = df["trajectory"].apply(lambda t: f"{basename}::{t}")
 
     # Keep all trajectories in rolling-windows analysis
-    counts = df["trajectory"].value_counts()
-    valid_traj = counts[counts >= 0].index
-    df = df[df["trajectory"].isin(valid_traj)]
 
     all_rows: list[pd.DataFrame] = []
     new_traj_id = 0
@@ -221,12 +215,14 @@ def run_rolling_windows(traj_csv: str, settings: dict) -> pd.DataFrame:
             all_rows.append(window)
             new_traj_id += 1
 
-    if all_rows:
-        out_df = pd.concat(all_rows, ignore_index=True)
-    else:
-        out_df = pd.DataFrame(columns=df.columns.tolist() + ["focal_point"])
-        trajectory_counts = out_df["ur_trajectory"].value_counts()
-        out_df["ur_length"] = out_df["ur_trajectory"].map(trajectory_counts)
+    if not all_rows:
+        print(
+            f"  [rolling windows] no windows produced for {basename} "
+            f"(all trajectories shorter than window_size={window_size}); skipping SASPT."
+        )
+        return pd.DataFrame(columns=df.columns.tolist() + ["focal_point", "MLE_D"])
+
+    out_df = pd.concat(all_rows, ignore_index=True)
 
     SA = StateArray.from_detections(out_df, **settings["saspt"])
     marginal_D = SA.posterior_assignment_probabilities.sum(axis=1)
