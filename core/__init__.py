@@ -10,6 +10,17 @@ fastQuot is bundled inside the repository:
         fastQuot/
             quot/           ← the quot package lives here
         core/               ← this file lives here
+
+GPU acceleration
+----------------
+The bundled quot automatically uses CUDA for detection and localisation when
+PyTorch is installed and a CUDA device is present.  Set
+
+    gpu:
+      use_gpu: false
+
+in ``settings_override.yaml`` to disable GPU and force CPU execution, or call
+:func:`core.set_gpu_enabled` at runtime.
 """
 
 import os
@@ -22,3 +33,40 @@ _BUNDLED_FASTQUOT = os.path.join(_REPO_ROOT, "fastQuot")
 # Prepend so the bundled copy always wins over any installed quot
 if _BUNDLED_FASTQUOT not in sys.path:
     sys.path.insert(0, _BUNDLED_FASTQUOT)
+
+
+def set_gpu_enabled(enabled: bool) -> None:
+    """
+    Enable or disable GPU acceleration for detection and localisation.
+
+    Parameters
+    ----------
+    enabled : bool
+        ``True`` (default) — use CUDA if a device is present.
+        ``False`` — force CPU-only execution.
+    """
+    try:
+        from quot import cuda_detect, cuda_localize
+        cuda_detect._GPU_DETECT_AVAILABLE = enabled
+        cuda_localize._GPU_LOCALIZE_AVAILABLE = enabled
+    except Exception:
+        pass  # modules not importable yet — harmless
+
+
+def _apply_gpu_settings(settings: dict) -> None:
+    """Called by run_local / Snakemake after settings are loaded."""
+    use_gpu = settings.get("gpu", {}).get("use_gpu", True)
+    if not use_gpu:
+        set_gpu_enabled(False)
+
+
+def _report_gpu_status() -> str:
+    """Return a one-line string describing GPU availability."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            name = torch.cuda.get_device_name(0)
+            return f"GPU enabled — {name}"
+        return "GPU not available (no CUDA device found) — running on CPU"
+    except ImportError:
+        return "GPU not available (PyTorch not installed) — running on CPU"

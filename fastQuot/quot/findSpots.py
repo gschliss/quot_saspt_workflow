@@ -4,16 +4,16 @@ findSpots.py -- detect spots in 2D images
 
 """
 # Numeric
-import numpy as np 
+import numpy as np
 
 # Real-valued FFT
-from numpy.fft import rfft2, irfft2, fftshift 
+from numpy.fft import rfft2, irfft2, fftshift
 
 # Image processing / filtering
-from scipy import ndimage as ndi 
+from scipy import ndimage as ndi
 
 # Caching
-from functools import lru_cache 
+from functools import lru_cache
 
 # Custom utilities
 from .helper import (
@@ -23,6 +23,15 @@ from .helper import (
     assign_methods,
     hollow_box_var
 )
+
+# ---------------------------------------------------------------------------
+# GPU detection (optional — falls back silently if torch is absent or no GPU)
+# ---------------------------------------------------------------------------
+try:
+    from .cuda_detect import llr_gpu as _llr_gpu, _CUDA_AVAILABLE as _GPU_DETECT_AVAILABLE
+except Exception:
+    _llr_gpu = None
+    _GPU_DETECT_AVAILABLE = False
 
 def gauss(I, k=1.0, w=9, t=200.0, return_filt=False):
     """
@@ -429,10 +438,9 @@ def gauss_filt_min_max(I, k=1.0, w=9, t=200.0, mode='constant',
 
 def llr(I, k=1.0, w=9, t=20.0, return_filt=False):
     """
-    Perform a log-likelihood ratio test for the presence of 
-    spots. This is the ratio of likelihood of a Gaussian spot
-    in the center of the subwindow, relative to the likelihood
-    of flat background with Gaussian noise.
+    Perform a log-likelihood ratio test for the presence of
+    spots. Uses GPU (cuda_detect.llr_gpu) when PyTorch + CUDA are
+    available; otherwise falls back to the CPU path below.
 
     args
     ----
@@ -448,7 +456,7 @@ def llr(I, k=1.0, w=9, t=20.0, return_filt=False):
         (
             2D ndarray, the post-convolution image;
             2D ndarray, the thresholded binary image;
-            2D ndarray, shape (n_spots, 2), the y and x 
+            2D ndarray, shape (n_spots, 2), the y and x
                 coordinates of each spot
         )
         else
@@ -456,6 +464,14 @@ def llr(I, k=1.0, w=9, t=20.0, return_filt=False):
                 coordinates of each spot
 
     """
+    # ---- GPU fast path ----
+    if _GPU_DETECT_AVAILABLE:
+        try:
+            return _llr_gpu(I, k=k, w=w, t=t, return_filt=return_filt)
+        except Exception:
+            pass  # fall through to CPU
+
+    # ---- CPU path ----
     # Generate the convolution kernel and normalization factor
     G_rft, Sgc2 = _mle_amp_setup(*I.shape, k, w)
     n_pixels = w**2

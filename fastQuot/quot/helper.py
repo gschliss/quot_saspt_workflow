@@ -32,7 +32,10 @@ import warnings
 # Profiling
 from time import time 
 
-from .plot import wireframe_overlay
+try:
+    from .plot import wireframe_overlay  # GUI/debug only; plot.py needs nd2reader
+except (ImportError, RuntimeError):
+    wireframe_overlay = None
 
 def time_f(f):
     """

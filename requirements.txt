@@ -9,6 +9,11 @@ pandas
 scipy
 matplotlib
 
+# GPU acceleration (detection + localisation)
+# CPU-only fallback works without this — install the CUDA build for full speed:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu118
+torch
+
 # Single-particle tracking & diffusion inference
 saspt
 

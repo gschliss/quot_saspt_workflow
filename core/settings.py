@@ -128,6 +128,11 @@ def get_default_settings() -> dict:
     settings["saspt"]["loc_errors"] = np.linspace(0.025, 0.028, 5)
     settings["saspt"]["start_frame"] = 0
 
+    # -- gpu ------------------------------------------------------------------
+    # Set to False to force CPU execution even when CUDA is available.
+    settings["gpu"] = {}
+    settings["gpu"]["use_gpu"] = True
+
     # -- plot -----------------------------------------------------------------
     settings["plot"]["xlim"] = (-2, 2)
     settings["plot"]["bleach_xlim"] = (-300, 50)

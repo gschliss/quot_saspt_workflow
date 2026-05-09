@@ -30,6 +30,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 
 import core  # noqa: F401  — boots fastQuot sys.path insert
+from core import _apply_gpu_settings, _report_gpu_status
 from core.settings import load_settings, update_settings_with_image_metadata, print_nested_dict
 from core.utils import group_files_by_metadata, identify_missing_filewise
 from core.filewise import run_filewise
@@ -83,6 +84,8 @@ def main() -> None:
     # Load and persist settings
     # ------------------------------------------------------------------
     settings = load_settings(data_directory)
+    _apply_gpu_settings(settings)
+    print(f"  {_report_gpu_status()}\n")
 
     pkl_path = os.path.join(settings["io"]["analysis_directory"], "settings.pkl")
     with open(pkl_path, "wb") as fh:

@@ -4,13 +4,13 @@ subpixel.py -- localize PSFs to subpixel resolution
 
 """
 # Numeric
-import numpy as np 
+import numpy as np
 
 # Dataframes
-import pandas as pd 
+import pandas as pd
 
-# Image processing 
-from scipy import ndimage as ndi 
+# Image processing
+from scipy import ndimage as ndi
 
 # Low-level subpixel localization utilities
 from .helper import (
@@ -26,6 +26,15 @@ from .helper import (
     fit_poisson_int_gaussian,
     check_2d_gauss_fit
 )
+
+# ---------------------------------------------------------------------------
+# GPU localisation (optional)
+# ---------------------------------------------------------------------------
+try:
+    from .cuda_localize import localize_frame_gpu as _localize_frame_gpu
+    _GPU_LOCALIZE_AVAILABLE = True
+except Exception:
+    _GPU_LOCALIZE_AVAILABLE = False
 
 def centroid(I, sub_bg=False):
     """
@@ -393,11 +402,15 @@ def localize_frame(img, positions, method=None, window_size=9,
     Run localization on multiple spots in a large 2D image,
     returning the result as a pandas DataFrame.
 
+    For the ``ls_int_gaussian`` method this routes through a GPU-accelerated
+    batched fitter (cuda_localize) when PyTorch is available, falling back
+    to the per-spot CPU loop otherwise.
+
     args
     ----
         img         :   2D ndarray (YX), the image frame
         positions   :   2D ndarray of shape (n_spots, 2),
-                        the y and x positions at which to 
+                        the y and x positions at which to
                         localize spots
         method      :   str, a method in METHODS
         window_size :   int, the fitting window size
@@ -415,33 +428,39 @@ def localize_frame(img, positions, method=None, window_size=9,
     if method is None:
         return positions
 
-    # Remove detections too close to the edge for a square subwindow
-    if len(positions.shape)==2:
-        hw = window_size // 2
-        positions = positions[
-            (positions[:,0]>=hw) & (positions[:,0]<img.shape[0]-hw) & \
-            (positions[:,1]>=hw) & (positions[:,1]<img.shape[1]-hw)
-        , :]
-
-        # Get the localization method
-        method_f = METHODS.get(method)
-
-        # Localize a PSF in a subwindow of the image
-        def localize_subwindow(yd, xd):
-            psf_img = np.clip(
-                img[yd-hw:yd+hw+1, xd-hw:xd+hw+1]-camera_bg, 0, np.inf
-            ) / camera_gain
-            r = method_f(psf_img, **method_kwargs)
-            r.update({"y_detect": yd, "x_detect": xd})
-            r['y'] = r['y'] + yd - hw
-            r['x'] = r['x'] + xd - hw
-            return r
-
-        # Run localization on all PSF subwindows
-        result = pd.DataFrame([localize_subwindow(yd, xd) \
-            for yd, xd in positions])
-        return result
-
-    else:
+    if not (isinstance(positions, np.ndarray) and positions.ndim == 2):
         return pd.DataFrame([])
+
+    # ---- GPU fast path (ls_int_gaussian only) ----
+    if _GPU_LOCALIZE_AVAILABLE and method == "ls_int_gaussian":
+        try:
+            return _localize_frame_gpu(
+                img, positions, method=method, window_size=window_size,
+                camera_bg=camera_bg, camera_gain=camera_gain, **method_kwargs
+            )
+        except Exception:
+            pass  # fall through to CPU loop
+
+    # ---- CPU path ----
+    hw = window_size // 2
+    positions = positions[
+        (positions[:, 0] >= hw) & (positions[:, 0] < img.shape[0] - hw) &
+        (positions[:, 1] >= hw) & (positions[:, 1] < img.shape[1] - hw)
+    ]
+
+    method_f = METHODS.get(method)
+
+    def localize_subwindow(yd, xd):
+        psf_img = np.clip(
+            img[yd-hw:yd+hw+1, xd-hw:xd+hw+1] - camera_bg, 0, np.inf
+        ) / camera_gain
+        r = method_f(psf_img, **method_kwargs)
+        r.update({"y_detect": yd, "x_detect": xd})
+        r['y'] = r['y'] + yd - hw
+        r['x'] = r['x'] + xd - hw
+        return r
+
+    result = pd.DataFrame([localize_subwindow(yd, xd)
+                           for yd, xd in positions])
+    return result
 
