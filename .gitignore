@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Analysis output directories (large, generated)
+tracking_output*/
+trajectories/
+posterior/
+MLE/
+rolling_windows/
+split_directory/
+split_trajectories/
+movies/
+plots/
+
+# Data files (large)
+*.nd2
+*.tif
+*.tiff
+*.csv
+*.pkl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

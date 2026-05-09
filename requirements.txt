@@ -1,0 +1,38 @@
+# quot_saspt_workflow dependencies
+# Install with:  pip install -r requirements.txt
+#
+# The quot/fastQuot package is bundled in fastQuot/ — no separate install needed.
+
+# Core scientific stack
+numpy
+pandas
+scipy
+matplotlib
+
+# Single-particle tracking & diffusion inference
+saspt
+
+# Image I/O
+pims
+nd2reader==3.2.1
+imageio
+imageio-ffmpeg
+tifffile
+Pillow
+
+# HMM
+hmmlearn
+
+# YAML settings
+PyYAML
+
+# Snakemake (for HPC cluster workflow; optional for local use)
+snakemake
+
+# quot transitive dependencies (already satisfied by fastQuot bundle)
+dask
+munkres
+scikit-image
+seaborn
+toml
+tqdm
