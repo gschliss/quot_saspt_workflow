@@ -34,6 +34,13 @@ _BUNDLED_FASTQUOT = os.path.join(_REPO_ROOT, "fastQuot")
 if _BUNDLED_FASTQUOT not in sys.path:
     sys.path.insert(0, _BUNDLED_FASTQUOT)
 
+# Fix nd2reader's hardcoded 16-bit pixel decoding so 8-bit .nd2 files
+# (uiBpcInMemory == 8) don't crash the moment a frame is read. See
+# core/nd2_bitdepth_patch.py for the full explanation. No-op if nd2reader
+# isn't installed yet.
+from .nd2_bitdepth_patch import apply as _apply_nd2_bitdepth_patch
+_apply_nd2_bitdepth_patch()
+
 
 def set_gpu_enabled(enabled: bool) -> None:
     """

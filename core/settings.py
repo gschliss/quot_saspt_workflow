@@ -20,6 +20,13 @@ import pims
 # Ensure fastQuot is on the path (harmless to call again if __init__ already ran)
 import core  # noqa: F401  — triggers core/__init__.py sys.path insert
 
+# min_I0 default, calibrated against a 16-bit camera's dynamic range (0-65535).
+# update_settings_with_image_metadata() rescales this proportionally when a
+# movie's own pixel values indicate a lower bit depth (e.g. an 8-bit .nd2),
+# but only if the user hasn't already overridden min_I0 in settings_override.yaml.
+_DEFAULT_MIN_I0_16BIT = 100.0
+_REFERENCE_BIT_DEPTH = 16
+
 
 # ---------------------------------------------------------------------------
 # Utility helpers (moved from trackingCodeFunctions.py)
@@ -112,7 +119,7 @@ def get_default_settings() -> dict:
     settings["quot"]["track"]["frame_interval"] = 0.006
     settings["quot"]["track"]["search_radius"] = 1.2
     settings["quot"]["track"]["max_blinks"] = 0
-    settings["quot"]["track"]["min_I0"] = 100.0
+    settings["quot"]["track"]["min_I0"] = _DEFAULT_MIN_I0_16BIT
     settings["quot"]["track"]["scale"] = 1.0
 
     # -- saspt ----------------------------------------------------------------
@@ -220,6 +227,26 @@ def update_default_settings_for_analysis(settings: dict, data_directory: str) ->
 # Image-metadata update
 # ---------------------------------------------------------------------------
 
+def _infer_bit_depth(img, first_frame, max_frames_to_sample: int = 10) -> int:
+    """Infer the nominal camera bit depth from observed pixel values.
+
+    nd2reader always reports frame dtype as float64 regardless of the
+    camera's actual bit depth, and nd2 metadata does not expose a bit-depth
+    field either — so the only reliable signal available is the observed
+    intensity range across a handful of frames.
+    """
+    n_frames = len(img)
+    observed_max = float(np.max(first_frame))
+    for i in range(1, min(n_frames, max_frames_to_sample)):
+        observed_max = max(observed_max, float(np.max(img[i])))
+
+    if observed_max <= 255:
+        return 8
+    elif observed_max <= 4095:
+        return 12
+    return 16
+
+
 def update_settings_with_image_metadata(
     settings: dict, cond: str | None = None, nd2_path: str | None = None
 ) -> dict:
@@ -269,6 +296,29 @@ def update_settings_with_image_metadata(
     settings["quot"]["track"]["pixel_size_um"] = pixel_size_um
     settings["saspt"]["pixel_size_um"] = pixel_size_um
 
+    # -- bit-depth-aware min_I0 -------------------------------------------
+    # min_I0 (spot-amplitude threshold) is calibrated by default against a
+    # 16-bit camera's dynamic range. An 8-bit (or 12-bit) .nd2 tops out far
+    # below that, so a flat 100.0 AU threshold can silently discard most or
+    # all genuine detections. Rescale proportionally, unless the user has
+    # explicitly set min_I0 in settings_override.yaml.
+    bit_depth = _infer_bit_depth(img, frame)
+    settings["io"]["detected_bit_depth"] = bit_depth
+
+    min_I0_baseline = settings["io"].get("_min_I0_baseline", _DEFAULT_MIN_I0_16BIT)
+    if bit_depth < _REFERENCE_BIT_DEPTH:
+        scale = (2 ** bit_depth - 1) / (2 ** _REFERENCE_BIT_DEPTH - 1)
+        rescaled_min_I0 = min_I0_baseline * scale
+        settings["quot"]["track"]["min_I0"] = rescaled_min_I0
+        print(
+            f"NOTE: {image_path} looks like {bit_depth}-bit data (max observed "
+            f"pixel value <= {2 ** bit_depth - 1}); rescaling min_I0 from "
+            f"{min_I0_baseline:g} to {rescaled_min_I0:g} to match its dynamic "
+            f"range. Set 'quot.track.min_I0' in settings_override.yaml to override."
+        )
+    else:
+        settings["quot"]["track"]["min_I0"] = min_I0_baseline
+
     return settings
 
 
@@ -307,5 +357,12 @@ def load_settings(data_directory: str) -> dict:
         print(f"Applied settings overrides from {override_path}")
 
     update_default_settings_for_analysis(settings, data_directory)
+
+    # Snapshot the user-configured (default-or-override) min_I0 *before* any
+    # per-file bit-depth rescaling happens in update_settings_with_image_metadata.
+    # Kept under "io" (rather than "quot"/"track") so it never gets spread as a
+    # stray kwarg into quot's track_file()/track() calls, which pass
+    # settings["quot"] / settings["quot"]["track"] straight through as **kwargs.
+    settings["io"]["_min_I0_baseline"] = settings["quot"]["track"]["min_I0"]
 
     return settings

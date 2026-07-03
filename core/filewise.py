@@ -109,6 +109,39 @@ def run_saspt(traj_csv: str, settings: dict) -> None:
         lambda g: g["I0"].mean() > settings["quot"]["track"]["min_I0"]
     )
 
+    # SASPT (like a Markov/HMM state array) needs at least one trajectory with
+    # more than one linked detection to estimate any state transition. A very
+    # short movie (or one where min_I0 filtering removes most detections) can
+    # leave zero such trajectories; saspt itself doesn't raise in that case,
+    # it just silently returns a degenerate all-zero result. Detect that here
+    # and skip explicitly instead, so the output files clearly reflect
+    # "nothing usable was found" rather than looking like a normal result.
+    n_multiframe_trajs = int((spots.groupby("trajectory").size() > 1).sum())
+    if n_multiframe_trajs == 0:
+        print(
+            f"  [SASPT] {os.path.basename(traj_csv)} has no multi-frame trajectories "
+            "after min_I0 filtering (movie too short/sparse to fit a state array); "
+            "skipping SASPT and writing empty MLE/posterior output."
+        )
+        basename = os.path.basename(traj_csv)
+        pd.DataFrame(
+            columns=["orig_trajectory", "track_length", "MLE_D", "source_file"]
+        ).to_csv(
+            os.path.join(settings["io"]["MLE_directory"], basename.replace("_traj", "_MLE")),
+            index=False,
+        )
+        pd.DataFrame(
+            {
+                "D": settings["saspt"]["diff_coefs"],
+                "density": np.zeros(len(settings["saspt"]["diff_coefs"])),
+                "file": basename,
+            }
+        ).to_csv(
+            os.path.join(settings["io"]["post_directory"], basename.replace("_traj", "_posterior")),
+            index=False,
+        )
+        return
+
     print("  Running SASPT")
     SA = StateArray.from_detections(spots, **settings["saspt"])
     marginal_D = SA.posterior_assignment_probabilities.sum(axis=1)
@@ -273,12 +306,25 @@ def run_filewise(nd2_path: str, settings: dict) -> None:
     print(f"Processing: {os.path.basename(nd2_path)}")
     print(f"{'='*60}")
 
-    traj_csv = run_tracking(nd2_path, settings)
+    try:
+        traj_csv = run_tracking(nd2_path, settings)
+    except Exception as e:
+        # e.g. a movie with zero readable frames raises inside quot's own
+        # localize_file(); nothing downstream can run without a traj_csv.
+        print(f"WARNING: tracking failed for {os.path.basename(nd2_path)}: {e}")
+        print("  Skipping SASPT and rolling windows for this file.")
+        return
 
     print("\n  Executing SASPT")
-    run_saspt(traj_csv, settings)
+    try:
+        run_saspt(traj_csv, settings)
+    except Exception as e:
+        print(f"WARNING: SASPT failed for {os.path.basename(traj_csv)}: {e}")
 
     print("\n  Analysing rolling windows")
-    run_rolling_windows(traj_csv, settings)
+    try:
+        run_rolling_windows(traj_csv, settings)
+    except Exception as e:
+        print(f"WARNING: rolling-window analysis failed for {os.path.basename(traj_csv)}: {e}")
 
     print(f"\n  Done: {os.path.basename(nd2_path)}")
