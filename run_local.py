@@ -128,7 +128,11 @@ def main() -> None:
         for cond in conditions:
             # Re-apply per-condition image metadata before condition analysis
             update_settings_with_image_metadata(settings, cond=cond)
-            run_conditionwise(cond, settings)
+            try:
+                run_conditionwise(cond, settings)
+            except Exception as e:
+                print(f"WARNING: condition-wise analysis failed for {cond}: {e}")
+                print("  Skipping to the next condition.")
 
     # ------------------------------------------------------------------
     # AGGREGATE stage

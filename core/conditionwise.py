@@ -31,11 +31,14 @@ def run_conditionwise(condition: str, settings: dict) -> None:
     1. Aggregate posterior, MLE, and rollingMLE CSVs for this condition.
     2. QC / outlier removal using KS-distance on posterior distributions.
     3. Generate per-condition histogram + stacked bar-graph PDF.
-    4. Fit a Gaussian HMM to the rolling-window MLE diffusion rates.
-    5. Plot the empirical state-survival curve from the HMM posterior.
-    6. Measure bleaching curves and plot them.
-    7. Generate overlay MP4 movies for a random sample of trajectories.
-    8. Save a plotting PKL for use by :func:`~core.aggregate.run_aggregate`.
+    4. Plot the empirical state-survival curve from the naive
+       (threshold-only) population assignment, before HMM refinement.
+    5. Fit a Gaussian HMM to the rolling-window MLE diffusion rates.
+    6. Plot the empirical state-survival curve again, now from the
+       HMM-refined population assignment, for comparison against step 4.
+    7. Save a plotting PKL for use by :func:`~core.aggregate.run_aggregate`.
+    8. Measure bleaching curves and plot them.
+    9. Generate overlay MP4 movies for a random sample of trajectories.
 
     Parameters
     ----------
@@ -98,7 +101,18 @@ def run_conditionwise(condition: str, settings: dict) -> None:
     )
 
     # ------------------------------------------------------------------
-    # 4. Fit HMM
+    # 4. Plot survival curves from the naive (threshold-only) population
+    #    assignment, BEFORE any HMM state refinement — a baseline to
+    #    compare against the HMM-refined curves plotted after step 5.
+    # ------------------------------------------------------------------
+    rollingMLE = plots.compute_naive_pop(rollingMLE, settings, min_obs=7)
+    plots.plot_survival_HMM(
+        rollingMLE, settings, condition, showPlot=False, min_run=0,
+        pop_column="naive_pop",
+    )
+
+    # ------------------------------------------------------------------
+    # 5. Fit HMM
     # ------------------------------------------------------------------
     rollingMLE = plots.fitHMM(rollingMLE, settings, condition, min_obs=7)
 
@@ -109,16 +123,18 @@ def run_conditionwise(condition: str, settings: dict) -> None:
         rollingMLE["naive_pop"] = 0
 
     # ------------------------------------------------------------------
-    # 5. Plot empirical state survival from HMM posterior
+    # 6. Plot empirical state survival from the HMM-refined population
+    #    assignment, for comparison against the naive curves from step 4.
     # ------------------------------------------------------------------
     plots.plot_survival_HMM(
-        rollingMLE, settings, condition, showPlot=False, min_run=0
+        rollingMLE, settings, condition, showPlot=False, min_run=0,
+        pop_column="posterior_pop",
     )
 
     print("Finished HMM")
 
     # ------------------------------------------------------------------
-    # 6. Save plotting PKL
+    # 7. Save plotting PKL
     # ------------------------------------------------------------------
     plotting_pkl_dir = os.path.join(settings["io"]["plot_directory"], "plotting_pkls")
     os.makedirs(plotting_pkl_dir, exist_ok=True)
@@ -135,13 +151,13 @@ def run_conditionwise(condition: str, settings: dict) -> None:
         )
 
     # ------------------------------------------------------------------
-    # 7. Bleaching curves
+    # 8. Bleaching curves
     # ------------------------------------------------------------------
     bc = plots.aggregate_bleaching_data(rollingMLE, settings, n_particles=250)
     plots.plot_bleaching_curves(settings, bc)
 
     # ------------------------------------------------------------------
-    # 8. Generate movies
+    # 9. Generate movies
     # ------------------------------------------------------------------
     plots.generate_movies(rollingMLE, settings)
 

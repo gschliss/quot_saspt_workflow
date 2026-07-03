@@ -452,6 +452,86 @@ def get_runs(pops: np.ndarray, pop: int) -> np.ndarray:
 # HMM fitting
 # ---------------------------------------------------------------------------
 
+def _prepare_rolling_mle_for_hmm(
+    rollingMLE: pd.DataFrame, settings: dict, min_obs: int = 7
+):
+    """Shared prep for fitHMM/compute_naive_pop.
+
+    Filters to trajectories long enough to include (``min_obs``), builds the
+    ``log10(MLE_D)`` observation matrix the HMM fits, and computes the
+    threshold-only ``naive_pop`` label (independent of any HMM fit) by
+    binning against ``settings['plot']['barGraphBreaks']``.
+
+    Returns
+    -------
+    (dynamic_MLE_df, filtered_df, X, data, zones, log_zones, nPopulations)
+    ``dynamic_MLE_df`` is a copy of *rollingMLE* with a populated
+    ``naive_pop`` column.
+    """
+    nPopulations = len(settings["plot"]["barGraphLabels"])
+
+    dynamic_MLE_df = rollingMLE.copy()
+    dynamic_MLE_df["MLE_D"] = dynamic_MLE_df["MLE_D"].replace([np.inf, -np.inf], np.nan)
+
+    valid_trajs = (
+        dynamic_MLE_df.groupby("ur_trajectory")["frame"].transform("count") >= min_obs
+    )
+    filtered_df = dynamic_MLE_df[
+        valid_trajs & dynamic_MLE_df["MLE_D"].notna()
+    ].copy()
+
+    grouped = filtered_df.sort_values(["ur_trajectory", "frame"]).groupby("ur_trajectory")
+    data = [group["MLE_D"].values for _, group in grouped if len(group) >= min_obs]
+
+    if data:
+        X = np.concatenate(data).reshape(-1, 1)
+        X = np.log10(X + 1e-10)
+    else:
+        X = np.empty((0, 1))
+
+    eps = 1e-10
+    boundaries = [b if b > 0 else eps for b in settings["plot"]["barGraphBreaks"]]
+    zones = list(zip(boundaries[:-1], boundaries[1:]))
+    log_zones = [(np.log10(a), np.log10(b)) for a, b in zones]
+
+    naive_pop = np.full_like(X, fill_value=np.nan, dtype=float)
+    for i, (low, high) in enumerate(zones):
+        mask = (X >= np.log10(low)) & (X < np.log10(high))
+        naive_pop[mask] = i
+
+    dynamic_MLE_df["naive_pop"] = np.nan
+    start_idx = 0
+    grouped = filtered_df.sort_values(["ur_trajectory", "frame"]).groupby("ur_trajectory")
+    for traj_id, group in grouped:
+        traj_len = len(group)
+        if traj_len <= min_obs:
+            continue
+        dynamic_MLE_df.loc[group.index, "naive_pop"] = naive_pop[
+            start_idx : start_idx + traj_len
+        ]
+        start_idx += traj_len
+
+    return dynamic_MLE_df, filtered_df, X, data, zones, log_zones, nPopulations
+
+
+def compute_naive_pop(
+    rollingMLE: pd.DataFrame, settings: dict, min_obs: int = 7
+) -> pd.DataFrame:
+    """Classify each rolling-window MLE_D observation by simple thresholding.
+
+    Bins ``log10(MLE_D)`` against ``settings['plot']['barGraphBreaks']``,
+    independent of any HMM fit. Intended to be plotted (via
+    :func:`plot_survival_HMM` with ``pop_column="naive_pop"``) *before*
+    :func:`fitHMM`'s state refinement, as a baseline for comparison.
+
+    Returns
+    -------
+    A copy of *rollingMLE* with an added ``naive_pop`` column.
+    """
+    dynamic_MLE_df, *_ = _prepare_rolling_mle_for_hmm(rollingMLE, settings, min_obs=min_obs)
+    return dynamic_MLE_df
+
+
 def fitHMM(
     rollingMLE: pd.DataFrame,
     settings: dict,
@@ -485,23 +565,9 @@ def fitHMM(
     """
     np.set_printoptions(suppress=True, precision=4)
 
-    nPopulations = len(settings["plot"]["barGraphLabels"])
-
-    dynamic_MLE_df = rollingMLE.copy()
-    dynamic_MLE_df["MLE_D"] = dynamic_MLE_df["MLE_D"].replace([np.inf, -np.inf], np.nan)
-
-    valid_trajs = (
-        dynamic_MLE_df.groupby("ur_trajectory")["frame"].transform("count") >= min_obs
+    dynamic_MLE_df, filtered_df, X, data, zones, log_zones, nPopulations = (
+        _prepare_rolling_mle_for_hmm(rollingMLE, settings, min_obs=min_obs)
     )
-    filtered_df = dynamic_MLE_df[
-        valid_trajs & dynamic_MLE_df["MLE_D"].notna()
-    ].copy()
-
-    grouped = filtered_df.sort_values(["ur_trajectory", "frame"]).groupby("ur_trajectory")
-    data = [group["MLE_D"].values for _, group in grouped if len(group) >= min_obs]
-
-    X = np.concatenate(data).reshape(-1, 1)
-    X = np.log10(X + 1e-10)
     lengths = [len(traj) for traj in data]
 
     print("Running HMM")
@@ -519,16 +585,6 @@ def fitHMM(
                 for i, (low, high) in enumerate(self.mean_bounds):
                     self.means_[i, :] = np.clip(self.means_[i, :], low, high)
 
-    eps = 1e-10
-    boundaries = [b if b > 0 else eps for b in settings["plot"]["barGraphBreaks"]]
-    zones = list(zip(boundaries[:-1], boundaries[1:]))
-    log_zones = [(np.log10(a), np.log10(b)) for a, b in zones]
-
-    naive_pop = np.full_like(X, fill_value=np.nan, dtype=float)
-    for i, (low, high) in enumerate(zones):
-        mask = (X >= np.log10(low)) & (X < np.log10(high))
-        naive_pop[mask] = i
-
     model = BoundedMeanHMM(
         n_components=nPopulations,
         covariance_type="full",
@@ -537,16 +593,37 @@ def fitHMM(
         tol=1e-8,
         random_state=42,
     )
-    model.fit(X)
 
-    gamma = model.predict_proba(X)
-    fractions_soft = gamma.mean(axis=0)
-    posterior_pop = gamma.argmax(axis=1)
-    posterior_pop = np.array(posterior_pop)
+    # A GaussianHMM with several components needs enough independent,
+    # non-degenerate observations to estimate a covariance per state. Short
+    # trajectories tend to pile up at the diffusion-coefficient grid floor
+    # (MLE_D clamped to its minimum), which can starve one or more states of
+    # variance and drive hmmlearn's internal covariance estimate to NaN/inf
+    # ("array must not contain infs or NaNs" from scipy's cholesky). Treat
+    # that the same way run_saspt treats too-few-trajectories: skip with a
+    # clear warning and fall back to the threshold-based naive_pop, rather
+    # than crashing the whole condition (and, transitively, the whole batch).
+    hmm_fit_ok = True
+    try:
+        model.fit(X)
+        gamma = model.predict_proba(X)
+        fractions_soft = gamma.mean(axis=0)
+        posterior_pop = np.array(gamma.argmax(axis=1))
+    except (ValueError, np.linalg.LinAlgError) as e:
+        print(
+            f"  WARNING: HMM fit failed for condition {condition} ({e}); "
+            "likely too little/degenerate rolling-window data for "
+            f"{nPopulations} states. Falling back to naive (threshold-only) "
+            "population assignment; posterior_pop will be left as NaN and "
+            "no HMM_output file will be written for this condition."
+        )
+        hmm_fit_ok = False
+        posterior_pop = np.full(X.shape[0], np.nan)
 
+    # naive_pop was already assigned by _prepare_rolling_mle_for_hmm; only
+    # posterior_pop (the HMM-derived label) needs assigning here.
     start_idx = 0
     dynamic_MLE_df["posterior_pop"] = np.nan
-    dynamic_MLE_df["naive_pop"] = np.nan
 
     grouped = filtered_df.sort_values(["ur_trajectory", "frame"]).groupby("ur_trajectory")
     for traj_id, group in grouped:
@@ -556,10 +633,10 @@ def fitHMM(
         dynamic_MLE_df.loc[group.index, "posterior_pop"] = posterior_pop[
             start_idx : start_idx + traj_len
         ]
-        dynamic_MLE_df.loc[group.index, "naive_pop"] = naive_pop[
-            start_idx : start_idx + traj_len
-        ]
         start_idx += traj_len
+
+    if not hmm_fit_ok:
+        return dynamic_MLE_df
 
     # Sort states by ascending mean and reorder model attributes accordingly
     means = model.means_.flatten()
@@ -600,27 +677,39 @@ def plot_survival_HMM(
     max_lag: int = 50,
     showPlot: bool = False,
     min_run: int = 0,
+    pop_column: str = "posterior_pop",
 ) -> None:
-    """Plot empirical state-dwell survival curves for all HMM populations.
+    """Plot empirical state-dwell survival curves for all populations.
 
     One curve per population is drawn on the same axes, with 95 % Wilson CI
     shading.  Population labels come from
     ``settings['plot']['barGraphLabels']`` when available.
 
-    Saved to ``settings['io']['plot_directory']/survival_curves/
-    <cond>_fast_survival.pdf``.
-    """
-    df = rolling_MLE.copy()
-    df = df.dropna(subset=["posterior_pop"])
-    df["posterior_pop"] = df["posterior_pop"].astype(int)
+    Parameters
+    ----------
+    pop_column:
+        Which per-observation population label to use: ``"naive_pop"``
+        (threshold-only, independent of any HMM fit — see
+        :func:`compute_naive_pop`) or ``"posterior_pop"`` (HMM-refined,
+        from :func:`fitHMM`). Determines both the plot title and output
+        filename.
 
-    populations = sorted(df["posterior_pop"].unique())
+    Saved to ``settings['io']['plot_directory']/survival_curves/
+    <cond>_<naive|HMM>_survival.pdf``.
+    """
+    fit_label = {"naive_pop": "naive", "posterior_pop": "HMM"}.get(pop_column, pop_column)
+
+    df = rolling_MLE.copy()
+    df = df.dropna(subset=[pop_column])
+    df[pop_column] = df[pop_column].astype(int)
+
+    populations = sorted(df[pop_column].unique())
     pop_labels = settings["plot"].get("barGraphLabels", None)
 
     run_lengths_dict: dict[int, list] = {pop: [] for pop in populations}
     for traj_id, traj in df.groupby("ur_trajectory"):
         traj = traj.sort_values("frame")
-        pops = traj["posterior_pop"].values
+        pops = traj[pop_column].values
         for pop in populations:
             run_lengths_dict[pop].extend(get_runs(pops, pop))
 
@@ -685,7 +774,7 @@ def plot_survival_HMM(
     ax.set_xlim(0, xlim_max)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Survival probability")
-    ax.set_title(f"{cond} — HMM state dwell-time survival")
+    ax.set_title(f"{cond} — {fit_label} state dwell-time survival")
     ax.legend(fontsize="small")
     for spine in ["top", "right"]:
         ax.spines[spine].set_visible(False)
@@ -693,7 +782,7 @@ def plot_survival_HMM(
 
     output_dirname = os.path.join(settings["io"]["plot_directory"], "survival_curves")
     os.makedirs(output_dirname, exist_ok=True)
-    output_filename = os.path.join(output_dirname, f"{cond}_fast_survival.pdf")
+    output_filename = os.path.join(output_dirname, f"{cond}_{fit_label}_survival.pdf")
     fig.savefig(output_filename, dpi=300, format="pdf", bbox_inches="tight")
     print(f"  Saved {os.path.basename(output_filename)}")
 
