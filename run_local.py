@@ -109,11 +109,13 @@ def main() -> None:
         for cond, file_list in nd2_files.items():
             print(f"\n--- Tracking condition: {cond} ({len(file_list)} files) ---")
 
-            # Update frame-rate and background from a representative image
-            update_settings_with_image_metadata(settings, cond=cond)
-
             for filename in file_list:
                 nd2_path = os.path.join(settings["io"]["data_directory"], filename)
+
+                # Update pixel size, frame interval, and background from
+                # this exact file's own .nd2 metadata.
+                update_settings_with_image_metadata(settings, nd2_path=nd2_path)
+
                 run_filewise(nd2_path, settings)
 
     # ------------------------------------------------------------------

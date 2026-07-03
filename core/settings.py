@@ -220,32 +220,54 @@ def update_default_settings_for_analysis(settings: dict, data_directory: str) ->
 # Image-metadata update
 # ---------------------------------------------------------------------------
 
-def update_settings_with_image_metadata(settings: dict, cond: str | None = None) -> dict:
-    """Read frame-rate and background level from a representative .nd2 file.
+def update_settings_with_image_metadata(
+    settings: dict, cond: str | None = None, nd2_path: str | None = None
+) -> dict:
+    """Read pixel size, frame interval, and background level from an .nd2 file.
 
     Parameters
     ----------
     settings:
         Settings dict (mutated in-place and also returned).
     cond:
-        If provided, glob for ``*{cond}*.nd2`` inside the data directory;
-        otherwise use the first .nd2 file found.
+        If provided (and *nd2_path* is not), glob for ``*{cond}*.nd2`` inside
+        the data directory and use the first match as a representative file.
+        If neither *cond* nor *nd2_path* is given, use the first .nd2 file
+        found in the data directory.
+    nd2_path:
+        If provided, read metadata directly from this exact file instead of
+        an arbitrary representative file. This is what the filewise rule
+        uses, so each file's own pixel size and frame interval are picked up
+        even if they differ within a condition.
     """
-    if cond is None:
-        arbitrary_image = glob.glob(f"{settings['io']['data_directory']}/*.nd2")[0]
+    if nd2_path is not None:
+        image_path = nd2_path
+    elif cond is None:
+        image_path = glob.glob(f"{settings['io']['data_directory']}/*.nd2")[0]
     else:
-        arbitrary_image = glob.glob(
+        image_path = glob.glob(
             f"{settings['io']['data_directory']}/*{cond}*.nd2"
         )[0]
 
-    img = pims.open(arbitrary_image)
+    img = pims.open(image_path)
     frame = img[0]
     bg_level = np.median(frame)
     dt = 1 / img.frame_rate
 
+    fallback_pixel_size_um = settings["quot"]["track"]["pixel_size_um"]
+    pixel_size_um = img.metadata.get("pixel_microns", None)
+    if pixel_size_um is None:
+        pixel_size_um = fallback_pixel_size_um
+        print(
+            f"WARNING: no 'pixel_microns' calibration found in {image_path}; "
+            f"falling back to pixel_size_um={fallback_pixel_size_um}"
+        )
+
     settings["quot"]["localize"]["camera_bg"] = bg_level
     settings["quot"]["track"]["frame_interval"] = dt
     settings["saspt"]["frame_interval"] = dt
+    settings["quot"]["track"]["pixel_size_um"] = pixel_size_um
+    settings["saspt"]["pixel_size_um"] = pixel_size_um
 
     return settings
 

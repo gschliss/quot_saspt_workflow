@@ -90,22 +90,17 @@ rule filewise:
         from core.settings import update_settings_with_image_metadata
         from core.filewise import run_filewise
 
-        # Determine condition for this file (needed for image-metadata update)
         nd2_basename = wildcards.nd2_basename
-        condition = next(
-            (cond for cond, files in _GROUPED.items() if nd2_basename in files),
-            None,
-        )
+        nd2_path = os.path.join(_DATA_DIR, nd2_basename)
 
         # Load a fresh copy of settings (Snakemake jobs may run in separate
-        # processes) and update with per-condition image metadata.
+        # processes) and update pixel size / frame interval / background
+        # from this exact file's own .nd2 metadata.
         with open(os.path.join(_SETTINGS["io"]["analysis_directory"], "settings.pkl"), "rb") as fh:
             settings = pickle.load(fh)
 
-        if condition is not None:
-            update_settings_with_image_metadata(settings, cond=condition)
+        update_settings_with_image_metadata(settings, nd2_path=nd2_path)
 
-        nd2_path = os.path.join(_DATA_DIR, nd2_basename)
         run_filewise(nd2_path, settings)
 
 
