@@ -226,10 +226,15 @@ rule aggregate:
     params:
         settings = copy.deepcopy(_SETTINGS)
     run:
-        from core.aggregate import run_aggregate, run_aggregate_survival_by_exposure
+        from core.aggregate import (
+            run_aggregate,
+            run_aggregate_survival_by_exposure,
+            run_aggregate_survival_by_interval,
+        )
         from core.publish import publish_run_report
 
         settings = params.settings
         run_aggregate(settings)
         run_aggregate_survival_by_exposure(settings, min_length=2)
+        run_aggregate_survival_by_interval(settings, min_length=2)
         publish_run_report(settings)

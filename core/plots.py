@@ -417,6 +417,79 @@ def plot_survival_kaplan_meier(
     fig.savefig(output_filename, dpi=300, format="pdf", bbox_inches="tight")
     print(f"  Saved {os.path.basename(output_filename)}")
 
+
+def plot_survival_kaplan_meier_overlay(
+    grouped_traj_csvs: dict[str, list[str]],
+    settings: dict,
+    plot_label: str,
+    min_length: int = 2,
+    max_frame: int = 30,
+) -> None:
+    """Kaplan-Meier survival curves for several groups overlaid on one shared
+    set of axes -- one step-curve per group, e.g. comparing imaging
+    intervals directly rather than each getting its own separate plot.
+
+    Same fitting/censoring logic as :func:`plot_survival_kaplan_meier`
+    (see its docstring), just without the per-group confidence-interval
+    shading, which would overlap illegibly with more than one group on the
+    same axes.
+
+    Parameters
+    ----------
+    grouped_traj_csvs:
+        Maps a group's display label (e.g. ``"int=2p500"``) to the list of
+        ``_traj.csv`` paths pooled for that group.
+    plot_label:
+        Used for the plot title and output filename.
+
+    Saved to
+    ``settings['io']['plot_directory']/survival_curves/<plot_label>_survival_overlay.pdf``.
+    Skipped entirely if no group has any qualifying trajectory.
+    """
+    fig, ax = plt.subplots(figsize=(8, 5))
+    any_plotted = False
+
+    for group_label, traj_csvs in sorted(grouped_traj_csvs.items()):
+        per_traj = pd.concat([compute_trajectory_durations(f) for f in traj_csvs], ignore_index=True)
+        n_dropped = int((per_traj["n_detections"] < min_length).sum())
+        per_traj = per_traj[per_traj["n_detections"] >= min_length]
+
+        n_total = len(per_traj)
+        if n_total == 0:
+            print(f"  [KM survival overlay] no trajectories with >= {min_length} detections for {group_label}; skipping")
+            continue
+        n_censored = int(per_traj["censored"].sum())
+        print(
+            f"  [KM survival overlay] {group_label}: {n_total} trajectories (dropped {n_dropped} "
+            f"with < {min_length} detections), {n_censored} right-censored"
+        )
+
+        km_df = kaplan_meier(per_traj["duration"].to_numpy(), per_traj["censored"].to_numpy())
+        ax.step(km_df["time"], km_df["survival"], where="post", label=f"{group_label} (n={n_total})")
+        any_plotted = True
+
+    if not any_plotted:
+        plt.close(fig)
+        print(f"  [KM survival overlay] no group had qualifying trajectories for {plot_label}; skipping")
+        return
+
+    ax.set_xlabel("Frames elapsed since first detection")
+    ax.set_ylabel("Survival probability (Kaplan-Meier)")
+    ax.set_title(plot_label)
+    ax.set_ylim(0, 1.05)
+    ax.set_xlim(0, max_frame)
+    ax.legend(fontsize="small", loc="best")
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+    plt.tight_layout()
+
+    output_dirname = os.path.join(settings["io"]["plot_directory"], "survival_curves")
+    os.makedirs(output_dirname, exist_ok=True)
+    output_filename = os.path.join(output_dirname, f"{plot_label}_survival_overlay.pdf")
+    fig.savefig(output_filename, dpi=300, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved {os.path.basename(output_filename)}")
+
     if showPlot:
         plt.show()
     plt.close(fig)

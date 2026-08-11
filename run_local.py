@@ -49,7 +49,11 @@ from core.settings import (
 from core.utils import group_files_by_metadata, identify_missing_filewise
 from core.filewise import run_filewise
 from core.conditionwise import run_conditionwise
-from core.aggregate import run_aggregate, run_aggregate_survival_by_exposure
+from core.aggregate import (
+    run_aggregate,
+    run_aggregate_survival_by_exposure,
+    run_aggregate_survival_by_interval,
+)
 from core.publish import publish_run_report
 
 
@@ -165,6 +169,7 @@ def main() -> None:
         print("\n--- Aggregate cross-condition plots ---")
         run_aggregate(settings)
         run_aggregate_survival_by_exposure(settings, min_length=2)
+        run_aggregate_survival_by_interval(settings, min_length=2)
         publish_run_report(settings)
 
     print("\nDone.")

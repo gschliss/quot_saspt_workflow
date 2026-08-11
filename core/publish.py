@@ -28,6 +28,7 @@ import subprocess
 import tempfile
 
 from core.settings import print_nested_dict
+from core.utils import extract_metadata
 
 _REPO_SSH_ALIAS = "github-results"
 _REPO_URL = f"git@{_REPO_SSH_ALIAS}:gschliss/sptLanding.git"
@@ -65,6 +66,37 @@ _POPPLER_LIB_PATH = ":".join([
     "/share/software/user/open/libtiff/4.0.8/lib",
     "/share/software/user/open/libjpeg-turbo/1.5.1/lib",
 ])
+
+
+# Report layout: histograms first (ungrouped), then survival curves
+# (sub-grouped by int= when the plot's filename carries one -- e.g. lets
+# imaging-interval effects on trajectory survival be compared at a glance),
+# then bleaching curves, then anything else (e.g. aggregate_posterior.pdf/
+# aggregate_MLE_bar.pdf when the dataset has fastSPT data). A section is
+# omitted entirely if this run produced no plot of that type.
+_HISTOGRAM_SUFFIX = "_hist.pdf"
+_SURVIVAL_SUBDIR = "survival_curves"
+_BLEACHING_SUBDIR = "bleaching_curves"
+_SECTION_ORDER = ["Histograms", "Survival curves", "Bleaching curves", "Other"]
+_UNGROUPED_SUBGROUP = "Other"
+
+
+def _categorize_plot(rel: str) -> tuple[str, str | None]:
+    """Classify a plot path (relative to plot_directory) into a top-level
+    report section and, for survival curves only, a within-section subgroup
+    keyed by the plot's ``int=`` tag (or _UNGROUPED_SUBGROUP if it has
+    none -- e.g. the exp=-pooled or by_interval overlay plots, which don't
+    carry a single int= value themselves).
+    """
+    parts = rel.split(os.sep)
+    if len(parts) == 1 and rel.endswith(_HISTOGRAM_SUFFIX):
+        return "Histograms", None
+    if parts[0] == _SURVIVAL_SUBDIR:
+        interval = extract_metadata(rel, ["int"]).get("int")
+        return "Survival curves", (f"int={interval}" if interval else _UNGROUPED_SUBGROUP)
+    if parts[0] == _BLEACHING_SUBDIR:
+        return "Bleaching curves", None
+    return "Other", None
 
 
 def _git(*args: str, cwd: str) -> None:
@@ -152,29 +184,56 @@ def publish_run_report(settings: dict) -> str | None:
                 "",
             ]
 
+            # Bucket every plot into (section, subgroup) before rendering, so
+            # sections/subgroups can be emitted in a fixed order and omitted
+            # entirely when empty, regardless of the arbitrary alphabetical
+            # order glob() returned them in.
+            sections: dict[str, dict[str | None, list[str]]] = {}
             for pdf_path in pdf_paths:
                 rel = os.path.relpath(pdf_path, plot_dir)
-                flat_name = rel.replace(os.sep, "__")
+                section, subgroup = _categorize_plot(rel)
+                sections.setdefault(section, {}).setdefault(subgroup, []).append(pdf_path)
 
-                dest_pdf = os.path.join(pdf_abs_dir, flat_name)
-                shutil.copy2(pdf_path, dest_pdf)
+            for section in _SECTION_ORDER:
+                subgroups = sections.get(section)
+                if not subgroups:
+                    continue
+                lines.append(f"### {section}")
+                lines.append("")
 
-                png_prefix = os.path.join(report_abs_dir, os.path.splitext(flat_name)[0])
-                png_path = _rasterize_pdf_to_png(pdf_path, png_prefix)
+                subgroup_order = sorted(
+                    subgroups, key=lambda s: (s == _UNGROUPED_SUBGROUP, s or "")
+                )
+                for subgroup in subgroup_order:
+                    if subgroup is not None:
+                        lines.append(f"#### {subgroup}")
+                        lines.append("")
 
-                lines.append(f"### {rel}")
-                lines.append("")
-                if png_path:
-                    # report_abs_dir (and everything under it, incl. pdfs/) is
-                    # a subdirectory next to the .md file, not the .md file's
-                    # own directory -- links must be prefixed with
-                    # report_stem/, a bare basename/"pdfs/..." 404s.
-                    lines.append(f"![{rel}]({report_stem}/{os.path.basename(png_path)})")
-                else:
-                    lines.append("_(PNG preview unavailable — pdftoppm not on PATH for this job)_")
-                lines.append("")
-                lines.append(f"[Download PDF]({report_stem}/pdfs/{flat_name})")
-                lines.append("")
+                    for pdf_path in sorted(subgroups[subgroup]):
+                        rel = os.path.relpath(pdf_path, plot_dir)
+                        flat_name = rel.replace(os.sep, "__")
+
+                        dest_pdf = os.path.join(pdf_abs_dir, flat_name)
+                        shutil.copy2(pdf_path, dest_pdf)
+
+                        png_prefix = os.path.join(report_abs_dir, os.path.splitext(flat_name)[0])
+                        png_path = _rasterize_pdf_to_png(pdf_path, png_prefix)
+
+                        heading = "#####" if subgroup is not None else "####"
+                        lines.append(f"{heading} {rel}")
+                        lines.append("")
+                        if png_path:
+                            # report_abs_dir (and everything under it, incl.
+                            # pdfs/) is a subdirectory next to the .md file,
+                            # not the .md file's own directory -- links must
+                            # be prefixed with report_stem/, a bare
+                            # basename/"pdfs/..." 404s.
+                            lines.append(f"![{rel}]({report_stem}/{os.path.basename(png_path)})")
+                        else:
+                            lines.append("_(PNG preview unavailable — pdftoppm not on PATH for this job)_")
+                        lines.append("")
+                        lines.append(f"[Download PDF]({report_stem}/pdfs/{flat_name})")
+                        lines.append("")
 
             md_path = report_abs_dir + ".md"
             with open(md_path, "w") as fh:

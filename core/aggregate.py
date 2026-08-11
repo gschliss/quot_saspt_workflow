@@ -21,7 +21,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 import core  # noqa: F401
-from core.plots import _render_population_bar, plot_survival_kaplan_meier
+from core.plots import (
+    _render_population_bar,
+    plot_survival_kaplan_meier,
+    plot_survival_kaplan_meier_overlay,
+)
 from core.utils import extract_metadata, group_files_by_metadata
 
 
@@ -185,3 +189,51 @@ def run_aggregate_survival_by_exposure(
         )
 
     print("\nrun_aggregate_survival_by_exposure complete.")
+
+
+def run_aggregate_survival_by_interval(
+    settings: dict, min_length: int = 2, max_frame: int = 30
+) -> None:
+    """Kaplan-Meier trajectory survival curves for every distinct ``int=``
+    (imaging interval) tag, pooling every condition that shares it, overlaid
+    on one common set of axes so the effect of imaging interval on
+    trajectory survival can be compared directly.
+
+    Skipped entirely if no condition's filename carries an ``int=`` tag --
+    not every dataset encodes one.
+
+    Parameters
+    ----------
+    settings:
+        Fully-resolved workflow settings dict.
+    min_length, max_frame:
+        Passed through to :func:`~core.plots.plot_survival_kaplan_meier_overlay`.
+    """
+    grouped_nd2 = group_files_by_metadata(settings["io"]["data_directory"])
+    if not grouped_nd2:
+        print("run_aggregate_survival_by_interval: no conditions found — skipping.")
+        return
+
+    by_interval: dict[str, list[str]] = {}
+    for condition, nd2_files in grouped_nd2.items():
+        interval = extract_metadata(condition, ["int"]).get("int")
+        if interval is None:
+            continue
+        traj_csvs = [
+            os.path.join(settings["io"]["traj_directory"], os.path.splitext(f)[0] + "_traj.csv")
+            for f in nd2_files
+        ]
+        by_interval.setdefault(interval, []).extend(f for f in traj_csvs if os.path.exists(f))
+
+    if not by_interval:
+        print("run_aggregate_survival_by_interval: no 'int=' tag found on any condition — skipping.")
+        return
+
+    print(f"run_aggregate_survival_by_interval: interval groups found — {sorted(by_interval)}")
+    plot_survival_kaplan_meier_overlay(
+        {f"int={interval}": csvs for interval, csvs in by_interval.items()},
+        settings, "by_interval",
+        min_length=min_length, max_frame=max_frame,
+    )
+
+    print("\nrun_aggregate_survival_by_interval complete.")
