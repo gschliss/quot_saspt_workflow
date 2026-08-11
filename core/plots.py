@@ -6,10 +6,13 @@ All plotting and visualisation functions, moved from plotFunctions.py.
 Includes:
 - Outlier detection (find_outlier_filenames, find_outlier_positions)
 - Posterior/MLE histogram plots (generate_posterior_plotting_df, generate_plots)
-- Trajectory survival curves (compute_trajectory_durations, kaplan_meier,
-  plot_survival_kaplan_meier) -- Kaplan-Meier estimate straight from raw
-  _traj.csv files, right-censoring trajectories still alive at the last
-  observed frame instead of dropping them
+- Trajectory survival curves (compute_trajectory_durations,
+  compute_life_table_survival, plot_survival_kaplan_meier,
+  plot_survival_kaplan_meier_overlay) -- discrete-time/life-table estimate
+  straight from raw _traj.csv files, right-censoring trajectories still
+  alive at the last observed frame instead of dropping them. kaplan_meier
+  (continuous-event-time KM with a Greenwood's-formula CI) is kept only
+  for plot_survival_by_hmm_state's per-HMM-state dwell-time curves.
 - Hidden Markov Model fitting (fitHMM) -- state assignment only; no longer
   feeds a survival plot, just the HMM_output/<condition>_HMM.txt summary
 - Detections-per-trajectory QC histogram (plot_detections_histogram)
@@ -295,6 +298,73 @@ def compute_trajectory_durations(traj_csv: str) -> pd.DataFrame:
     return per_traj.reset_index()
 
 
+def compute_life_table_survival(
+    traj_csvs: list[str], min_length: int = 2, max_frame: int = 30
+) -> pd.DataFrame | None:
+    """Discrete-time (life-table/actuarial) survival estimate straight from
+    raw ``_traj.csv`` files, evaluated at every integer frame 0..max_frame.
+
+    Ported to match a validated R/dplyr script the user already runs by
+    hand for this same analysis, so pipeline output is numerically
+    comparable to it: trajectory length is frame span *plus one*
+    (``last_frame - first_frame + 1``, not this module's ``duration``,
+    which omits the +1), and at each integer time step ``t`` the survival
+    probability is ``(n_at_risk - n_events) / n_at_risk`` among trajectories
+    still at risk (``length >= t``), with the running product expressed as
+    a percentage (0-100) rather than a 0-1 probability -- cumulatively
+    equivalent to standard Kaplan-Meier (no confidence interval), just
+    evaluated at every frame instead of only at observed event times.
+
+    Trajectories shorter than *min_length* frames are dropped first (R:
+    ``filter(traj_length > 1)``, i.e. the default ``min_length=2``).
+    Right-censoring is still per source file -- a trajectory whose last
+    detection lands on the last frame observed anywhere in ITS OWN file is
+    censored -- rather than against one fixed global cutoff, since movies
+    in this project vary in total frame count.
+
+    Returns
+    -------
+    DataFrame with columns time, n_at_risk, n_events, survival_pct, for
+    time in 0..max_frame -- or None if no trajectory meets *min_length*.
+    """
+    per_traj = pd.concat([compute_trajectory_durations(f) for f in traj_csvs], ignore_index=True)
+    per_traj["traj_length"] = per_traj["last_frame"] - per_traj["first_frame"] + 1
+    per_traj = per_traj[per_traj["traj_length"] >= min_length]
+    if len(per_traj) == 0:
+        return None
+
+    lengths = per_traj["traj_length"].to_numpy()
+    is_event = ~per_traj["censored"].to_numpy()  # "ended" in the R script
+
+    rows = []
+    cumulative = 1.0
+    for t in range(0, max_frame + 1):
+        at_risk = lengths >= t
+        n_at_risk = int(at_risk.sum())
+        n_events = int(np.sum(is_event & (lengths == t))) if n_at_risk else 0
+        if n_at_risk > 0:
+            cumulative *= (n_at_risk - n_events) / n_at_risk
+        rows.append({
+            "time": t, "n_at_risk": n_at_risk, "n_events": n_events,
+            "survival_pct": cumulative * 100,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _write_trajectory_count_table(output_pdf_path: str, rows: list[tuple[str, int]]) -> None:
+    """Write a ``label,n_trajectories`` CSV sidecar next to *output_pdf_path*
+    (same stem, ``.n.csv`` extension) -- read back by publish_run_report to
+    render a trajectory-count table above the plot, instead of baking a
+    text annotation into the image itself.
+    """
+    sidecar_path = os.path.splitext(output_pdf_path)[0] + ".n.csv"
+    with open(sidecar_path, "w") as fh:
+        fh.write("label,n_trajectories\n")
+        for label, n in rows:
+            fh.write(f"{label},{n}\n")
+
+
 def kaplan_meier(durations: np.ndarray, censored: np.ndarray) -> pd.DataFrame:
     """Kaplan-Meier survival estimate with a Greenwood's-formula 95% CI.
 
@@ -351,62 +421,35 @@ def plot_survival_kaplan_meier(
     max_frame: int = 30,
     showPlot: bool = False,
 ) -> None:
-    """Kaplan-Meier trajectory survival curve straight from raw ``_traj.csv``
-    files -- one curve pooling every trajectory across all of *traj_csvs*.
+    """Discrete-time trajectory survival curve straight from raw
+    ``_traj.csv`` files -- one curve pooling every trajectory across all of
+    *traj_csvs*. See :func:`compute_life_table_survival` for the exact
+    calculation (ported from a validated reference R script) and
+    :func:`_write_trajectory_count_table` for the sidecar this writes so
+    publish_run_report can show a trajectory-count table above the plot.
 
-    Per trajectory, "survival time" is frames elapsed between its first and
-    last detection (the csv has no real timestamp). Trajectories whose last
-    detection lands on the last frame observed anywhere in their own source
-    file are right-censored (the movie just stopped recording, so we don't
-    know whether they really ended there) rather than dropped -- a censored
-    trajectory stays in the risk set up to its own last frame but isn't
-    counted as a "death" there, which is more information-preserving than
-    discarding it outright. See Greenwood's formula for the 95% CI.
-
-    Trajectories with fewer than *min_length* detections are dropped before
-    fitting (default 2 -- excludes single-frame blips, which would otherwise
-    dominate the curve's initial drop). *max_frame* only limits the plotted
-    x-range; the KM fit itself always uses every remaining trajectory's full
-    duration, since truncating the input would incorrectly shrink the risk
-    set at frames <= max_frame.
-
-    Caveat: censoring is detected from the last frame with ANY detection in
-    a given file, not that movie's true frame count (not available in the
-    csv) -- if a movie's last few frames have zero detections, a handful of
-    censored trajectories could be misclassified as real deaths.
+    Style matches that reference script's ggplot ``theme_classic`` look:
+    a plain line (not a step function), percent (0-100) y-axis, no
+    confidence band, no in-plot n= text.
 
     Saved to ``settings['io']['plot_directory']/survival_curves/<label>_survival.pdf``.
     """
-    per_traj = pd.concat([compute_trajectory_durations(f) for f in traj_csvs], ignore_index=True)
-
-    n_dropped = int((per_traj["n_detections"] < min_length).sum())
-    per_traj = per_traj[per_traj["n_detections"] >= min_length]
-
-    n_total = len(per_traj)
-    if n_total == 0:
-        print(f"  [KM survival] no trajectories with >= {min_length} detections for {label}; skipping")
+    life_table = compute_life_table_survival(traj_csvs, min_length=min_length, max_frame=max_frame)
+    if life_table is None:
+        print(f"  [survival] no trajectories with >= {min_length} frames for {label}; skipping")
         return
-    n_censored = int(per_traj["censored"].sum())
-    print(
-        f"  [KM survival] {label}: {n_total} trajectories (dropped {n_dropped} "
-        f"with < {min_length} detections), {n_censored} right-censored"
-    )
 
-    km_df = kaplan_meier(per_traj["duration"].to_numpy(), per_traj["censored"].to_numpy())
+    n_total = int(life_table["n_at_risk"].iloc[0])
+    print(f"  [survival] {label}: {n_total} trajectories")
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.fill_between(km_df["time"], km_df["ci_low"], km_df["ci_high"], step="post", alpha=0.25)
-    ax.step(km_df["time"], km_df["survival"], where="post", color="black")
+    ax.plot(life_table["time"], life_table["survival_pct"], color="black", linewidth=1)
 
     ax.set_xlabel("Frames elapsed since first detection")
-    ax.set_ylabel("Survival probability (Kaplan-Meier)")
+    ax.set_ylabel("Survival probability (%)")
     ax.set_title(label)
-    ax.set_ylim(0, 1.05)
+    ax.set_ylim(0, 105)
     ax.set_xlim(0, max_frame)
-    ax.text(
-        0.98, 0.95, f"n={n_total}, censored={n_censored}",
-        transform=ax.transAxes, ha="right", va="top", fontsize="small",
-    )
     for spine in ["top", "right"]:
         ax.spines[spine].set_visible(False)
     plt.tight_layout()
@@ -415,6 +458,7 @@ def plot_survival_kaplan_meier(
     os.makedirs(output_dirname, exist_ok=True)
     output_filename = os.path.join(output_dirname, f"{label}_survival.pdf")
     fig.savefig(output_filename, dpi=300, format="pdf", bbox_inches="tight")
+    _write_trajectory_count_table(output_filename, [(label, n_total)])
     print(f"  Saved {os.path.basename(output_filename)}")
 
     if showPlot:
@@ -429,15 +473,20 @@ def plot_survival_kaplan_meier_overlay(
     min_length: int = 2,
     max_frame: int = 30,
 ) -> None:
-    """Kaplan-Meier survival curves for several groups overlaid on one shared
-    set of axes -- one step-curve per group, e.g. one trace per condition
+    """Discrete-time survival curves for several groups overlaid on one
+    shared set of axes -- one trace per group, e.g. one per condition
     within a fixed imaging interval, rather than each getting its own
-    separate plot.
+    separate plot. See :func:`compute_life_table_survival` for the exact
+    calculation and :func:`_write_trajectory_count_table` for the sidecar
+    this writes so publish_run_report can show a trajectory-count table
+    above the plot.
 
-    Same fitting/censoring logic as :func:`plot_survival_kaplan_meier`
-    (see its docstring), just without the per-group confidence-interval
-    shading, which would overlap illegibly with more than one group on the
-    same axes.
+    Style matches a validated reference R script's ggplot ``theme_classic``
+    look: plain lines (not step functions), percent (0-100) y-axis, no
+    confidence bands (would overlap illegibly with more than one group on
+    the same axes), no in-plot n= text, and no counts in the legend either
+    (that script's legend was label-only) -- counts go in the sidecar
+    table instead.
 
     Parameters
     ----------
@@ -453,36 +502,29 @@ def plot_survival_kaplan_meier_overlay(
     Skipped entirely if no group has any qualifying trajectory.
     """
     fig, ax = plt.subplots(figsize=(8, 5))
-    any_plotted = False
+    count_rows: list[tuple[str, int]] = []
 
     for group_label, traj_csvs in sorted(grouped_traj_csvs.items()):
-        per_traj = pd.concat([compute_trajectory_durations(f) for f in traj_csvs], ignore_index=True)
-        n_dropped = int((per_traj["n_detections"] < min_length).sum())
-        per_traj = per_traj[per_traj["n_detections"] >= min_length]
-
-        n_total = len(per_traj)
-        if n_total == 0:
-            print(f"  [KM survival overlay] no trajectories with >= {min_length} detections for {group_label}; skipping")
+        life_table = compute_life_table_survival(traj_csvs, min_length=min_length, max_frame=max_frame)
+        if life_table is None:
+            print(f"  [survival overlay] no trajectories with >= {min_length} frames for {group_label}; skipping")
             continue
-        n_censored = int(per_traj["censored"].sum())
-        print(
-            f"  [KM survival overlay] {group_label}: {n_total} trajectories (dropped {n_dropped} "
-            f"with < {min_length} detections), {n_censored} right-censored"
-        )
 
-        km_df = kaplan_meier(per_traj["duration"].to_numpy(), per_traj["censored"].to_numpy())
-        ax.step(km_df["time"], km_df["survival"], where="post", label=f"{group_label} (n={n_total})")
-        any_plotted = True
+        n_total = int(life_table["n_at_risk"].iloc[0])
+        print(f"  [survival overlay] {group_label}: {n_total} trajectories")
 
-    if not any_plotted:
+        ax.plot(life_table["time"], life_table["survival_pct"], linewidth=1, label=group_label)
+        count_rows.append((group_label, n_total))
+
+    if not count_rows:
         plt.close(fig)
-        print(f"  [KM survival overlay] no group had qualifying trajectories for {plot_label}; skipping")
+        print(f"  [survival overlay] no group had qualifying trajectories for {plot_label}; skipping")
         return
 
     ax.set_xlabel("Frames elapsed since first detection")
-    ax.set_ylabel("Survival probability (Kaplan-Meier)")
+    ax.set_ylabel("Survival probability (%)")
     ax.set_title(plot_label)
-    ax.set_ylim(0, 1.05)
+    ax.set_ylim(0, 105)
     ax.set_xlim(0, max_frame)
     ax.legend(fontsize="small", loc="best")
     for spine in ["top", "right"]:
@@ -494,6 +536,7 @@ def plot_survival_kaplan_meier_overlay(
     output_filename = os.path.join(output_dirname, f"{plot_label}_survival_overlay.pdf")
     fig.savefig(output_filename, dpi=300, format="pdf", bbox_inches="tight")
     plt.close(fig)
+    _write_trajectory_count_table(output_filename, count_rows)
     print(f"  Saved {os.path.basename(output_filename)}")
 
 

@@ -19,6 +19,7 @@ here).
 
 from __future__ import annotations
 
+import csv
 import datetime
 import glob
 import io
@@ -97,6 +98,19 @@ def _categorize_plot(rel: str) -> tuple[str, str | None]:
     if parts[0] == _BLEACHING_SUBDIR:
         return "Bleaching curves", None
     return "Other", None
+
+
+def _read_trajectory_count_table(pdf_path: str) -> list[tuple[str, str]] | None:
+    """Read the ``label,n_trajectories`` sidecar CSV a survival plot writes
+    next to itself (see core.plots._write_trajectory_count_table), if any.
+    Plot types that don't write one (histograms, bleaching curves) simply
+    have no sidecar, so this returns None for them.
+    """
+    sidecar_path = os.path.splitext(pdf_path)[0] + ".n.csv"
+    if not os.path.exists(sidecar_path):
+        return None
+    with open(sidecar_path, newline="") as fh:
+        return [(row["label"], row["n_trajectories"]) for row in csv.DictReader(fh)]
 
 
 def _git(*args: str, cwd: str) -> None:
@@ -222,6 +236,15 @@ def publish_run_report(settings: dict) -> str | None:
                         heading = "#####" if subgroup is not None else "####"
                         lines.append(f"{heading} {rel}")
                         lines.append("")
+
+                        count_rows = _read_trajectory_count_table(pdf_path)
+                        if count_rows:
+                            lines.append("| Group | N trajectories |")
+                            lines.append("|---|---|")
+                            for group_label, n in count_rows:
+                                lines.append(f"| {group_label} | {n} |")
+                            lines.append("")
+
                         if png_path:
                             # report_abs_dir (and everything under it, incl.
                             # pdfs/) is a subdirectory next to the .md file,
