@@ -34,7 +34,9 @@ from core.utils import extract_metadata
 _REPO_SSH_ALIAS = "github-results"
 _REPO_URL = f"git@{_REPO_SSH_ALIAS}:gschliss/sptLanding.git"
 _REPO_BRANCH = "main"
-_REPO_DOCS_SUBDIR = "docs"
+# Reports live under data/, not docs/ -- docs/ is the GitHub Pages site
+# root (index.html etc.) and should stay untouched by run reports.
+_REPORTS_SUBDIR = "data"
 _MAX_PUSH_RETRIES = 5
 
 # pdftoppm (poppler/0.47.0) is deliberately NOT loaded via `ml system poppler`
@@ -170,7 +172,7 @@ def publish_run_report(settings: dict) -> str | None:
     analysis_tag = os.path.basename(settings["io"]["analysis_directory"].rstrip("/"))
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     report_stem = f"{timestamp}_{analysis_tag}"
-    report_rel_dir = os.path.join(_REPO_DOCS_SUBDIR, date_dir_name, report_stem)
+    report_rel_dir = os.path.join(_REPORTS_SUBDIR, date_dir_name, report_stem)
 
     try:
         with tempfile.TemporaryDirectory(dir=os.environ.get("SCRATCH")) as tmp:
