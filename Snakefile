@@ -193,7 +193,9 @@ rule aggregate:
         settings = copy.deepcopy(_SETTINGS)
     run:
         from core.aggregate import run_aggregate, run_aggregate_survival_by_exposure
+        from core.publish import publish_run_report
 
         settings = params.settings
         run_aggregate(settings)
         run_aggregate_survival_by_exposure(settings, min_length=2)
+        publish_run_report(settings)
