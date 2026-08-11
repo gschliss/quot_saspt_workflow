@@ -165,11 +165,15 @@ def publish_run_report(settings: dict) -> str | None:
                 lines.append(f"### {rel}")
                 lines.append("")
                 if png_path:
-                    lines.append(f"![{rel}]({os.path.basename(png_path)})")
+                    # report_abs_dir (and everything under it, incl. pdfs/) is
+                    # a subdirectory next to the .md file, not the .md file's
+                    # own directory -- links must be prefixed with
+                    # report_stem/, a bare basename/"pdfs/..." 404s.
+                    lines.append(f"![{rel}]({report_stem}/{os.path.basename(png_path)})")
                 else:
                     lines.append("_(PNG preview unavailable — pdftoppm not on PATH for this job)_")
                 lines.append("")
-                lines.append(f"[Download PDF](pdfs/{flat_name})")
+                lines.append(f"[Download PDF]({report_stem}/pdfs/{flat_name})")
                 lines.append("")
 
             md_path = report_abs_dir + ".md"
