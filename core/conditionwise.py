@@ -1,20 +1,27 @@
 """
 core/conditionwise.py
 
-Per-condition analysis: aggregate per-file CSVs, QC/outlier removal,
-diffusion histogram and bar-graph plots, HMM fitting, state survival
-curves, bleaching analysis, and movie generation.
+Per-condition analysis. Branches on ``settings["io"]["mode"]``:
+
+- slowSPT: just a Kaplan-Meier trajectory survival curve straight from this
+  condition's raw ``_traj.csv`` files (no SASPT/rolling-window output exists
+  to aggregate in slowSPT -- see core/filewise.py).
+- fastSPT: the full pipeline -- aggregate per-file CSVs, QC/outlier removal,
+  diffusion histogram and bar-graph plots, HMM fitting, a per-HMM-state
+  Kaplan-Meier dwell-time survival curve, bleaching analysis, and movie
+  generation.
 
 Public API
 ----------
 run_conditionwise(condition, settings)
-    Run the full condition-level analysis pipeline for one condition.
+    Run the mode-appropriate condition-level analysis for one condition.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import glob
 import pickle
 
 import pandas as pd
@@ -25,20 +32,7 @@ from core import plots
 
 
 def run_conditionwise(condition: str, settings: dict) -> None:
-    """Run all condition-level analyses for *condition*.
-
-    Steps performed (in order):
-    1. Aggregate posterior, MLE, and rollingMLE CSVs for this condition.
-    2. QC / outlier removal using KS-distance on posterior distributions.
-    3. Generate per-condition histogram + stacked bar-graph PDF.
-    4. Plot the empirical state-survival curve from the naive
-       (threshold-only) population assignment, before HMM refinement.
-    5. Fit a Gaussian HMM to the rolling-window MLE diffusion rates.
-    6. Plot the empirical state-survival curve again, now from the
-       HMM-refined population assignment, for comparison against step 4.
-    7. Save a plotting PKL for use by :func:`~core.aggregate.run_aggregate`.
-    8. Measure bleaching curves and plot them.
-    9. Generate overlay MP4 movies for a random sample of trajectories.
+    """Run condition-level analysis for *condition*, per ``settings["io"]["mode"]``.
 
     Parameters
     ----------
@@ -48,9 +42,53 @@ def run_conditionwise(condition: str, settings: dict) -> None:
         Fully-resolved workflow settings dict.
     """
     print(f"\n{'='*60}")
-    print(f"Condition-wise analysis: {condition}")
+    print(f"Condition-wise analysis: {condition} (mode={settings['io']['mode']})")
     print(f"{'='*60}")
 
+    if settings["io"]["mode"] == "slowSPT":
+        _run_conditionwise_slowSPT(condition, settings)
+    else:
+        _run_conditionwise_fastSPT(condition, settings)
+
+    print(f"\n  Condition-wise analysis complete: {condition}")
+
+
+def _run_conditionwise_slowSPT(condition: str, settings: dict) -> None:
+    """slowSPT: Kaplan-Meier survival curve straight from raw _traj.csv, done.
+
+    Writes a minimal marker PKL (no MLE/posterior data exists in slowSPT) to
+    ``plotting_pkls/<condition>.pkl`` purely so the Snakemake DAG has the
+    output file it expects; :func:`~core.aggregate.run_aggregate` skips
+    conditions whose PKL looks like this.
+    """
+    traj_csvs = sorted(
+        glob.glob(os.path.join(settings["io"]["traj_directory"], f"{condition}*_traj.csv"))
+    )
+    plots.plot_survival_kaplan_meier(traj_csvs, settings, condition, showPlot=False)
+
+    plotting_pkl_dir = os.path.join(settings["io"]["plot_directory"], "plotting_pkls")
+    os.makedirs(plotting_pkl_dir, exist_ok=True)
+    plotting_pkl = os.path.join(plotting_pkl_dir, f"{condition}.pkl")
+    with open(plotting_pkl, "wb") as fh:
+        pickle.dump({"mode": "slowSPT"}, fh)
+
+
+def _run_conditionwise_fastSPT(condition: str, settings: dict) -> None:
+    """fastSPT: full pipeline (SASPT aggregation, HMM, movies, plotting).
+
+    Steps performed (in order):
+    1. Aggregate posterior, MLE, and rollingMLE CSVs for this condition.
+    2. QC / outlier removal using KS-distance on posterior distributions.
+    3. Generate per-condition histogram + stacked bar-graph PDF.
+    4. Fit a Gaussian HMM to the rolling-window MLE diffusion rates
+       (writes ``HMM_output/<condition>_HMM.txt``).
+    5. Plot a Kaplan-Meier survival curve per HMM state (dwell time in each
+       diffusive population before transitioning out), one subplot per
+       population.
+    6. Save a plotting PKL for use by :func:`~core.aggregate.run_aggregate`.
+    7. Measure bleaching curves and plot them.
+    8. Generate overlay MP4 movies for a random sample of trajectories.
+    """
     # ------------------------------------------------------------------
     # 1. Aggregate per-file CSVs
     # ------------------------------------------------------------------
@@ -101,40 +139,19 @@ def run_conditionwise(condition: str, settings: dict) -> None:
     )
 
     # ------------------------------------------------------------------
-    # 4. Plot survival curves from the naive (threshold-only) population
-    #    assignment, BEFORE any HMM state refinement — a baseline to
-    #    compare against the HMM-refined curves plotted after step 5.
-    # ------------------------------------------------------------------
-    rollingMLE = plots.compute_naive_pop(rollingMLE, settings, min_obs=7)
-    plots.plot_survival_HMM(
-        rollingMLE, settings, condition, showPlot=False, min_run=0,
-        pop_column="naive_pop",
-    )
-
-    # ------------------------------------------------------------------
-    # 5. Fit HMM
+    # 4. Fit HMM (state assignment written to HMM_output/<condition>_HMM.txt,
+    #    and posterior_pop labels feed the per-state survival curve in step 5)
     # ------------------------------------------------------------------
     rollingMLE = plots.fitHMM(rollingMLE, settings, condition, min_obs=7)
-
-    # Handle slow-SPT data where rolling-window analysis spans >1 s frames:
-    # assign all detections to population 0 to avoid HMM artefacts.
-    if settings["saspt"]["frame_interval"] > 1:
-        rollingMLE["posterior_pop"] = 0
-        rollingMLE["naive_pop"] = 0
-
-    # ------------------------------------------------------------------
-    # 6. Plot empirical state survival from the HMM-refined population
-    #    assignment, for comparison against the naive curves from step 4.
-    # ------------------------------------------------------------------
-    plots.plot_survival_HMM(
-        rollingMLE, settings, condition, showPlot=False, min_run=0,
-        pop_column="posterior_pop",
-    )
-
     print("Finished HMM")
 
     # ------------------------------------------------------------------
-    # 7. Save plotting PKL
+    # 5. Plot a Kaplan-Meier survival curve per HMM-assigned diffusive state.
+    # ------------------------------------------------------------------
+    plots.plot_survival_by_hmm_state(rollingMLE, settings, condition, showPlot=False)
+
+    # ------------------------------------------------------------------
+    # 6. Save plotting PKL
     # ------------------------------------------------------------------
     plotting_pkl_dir = os.path.join(settings["io"]["plot_directory"], "plotting_pkls")
     os.makedirs(plotting_pkl_dir, exist_ok=True)
@@ -143,6 +160,7 @@ def run_conditionwise(condition: str, settings: dict) -> None:
     with open(plotting_pkl, "wb") as fh:
         pickle.dump(
             {
+                "mode": "fastSPT",
                 "MLE_df": MLE_df,
                 "posterior_plot_df": posterior_plot_df,
                 "rollingMLE": rollingMLE,
@@ -151,14 +169,12 @@ def run_conditionwise(condition: str, settings: dict) -> None:
         )
 
     # ------------------------------------------------------------------
-    # 8. Bleaching curves
+    # 7. Bleaching curves
     # ------------------------------------------------------------------
     bc = plots.aggregate_bleaching_data(rollingMLE, settings, n_particles=250)
     plots.plot_bleaching_curves(settings, bc)
 
     # ------------------------------------------------------------------
-    # 9. Generate movies
+    # 8. Generate movies
     # ------------------------------------------------------------------
     plots.generate_movies(rollingMLE, settings)
-
-    print(f"\n  Condition-wise analysis complete: {condition}")

@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 
 import core  # noqa: F401  — ensures fastQuot is on sys.path before quot import
+from core.utils import prepend_metadata_header, write_csv_with_metadata_header
 from quot.core import track_file
 
 try:
@@ -69,6 +70,7 @@ def run_tracking(nd2_path: str, settings: dict) -> str:
     print(f"\n  Tracking: {input_basename}")
     print(f"  Saving trajectories to: {quot_outcsv}")
     track_file(nd2_path, out_csv=quot_outcsv, **settings["quot"])
+    prepend_metadata_header(quot_outcsv, settings, source=nd2_path)
     return quot_outcsv
 
 
@@ -100,7 +102,7 @@ def run_saspt(traj_csv: str, settings: dict) -> None:
     print(f"  Sending MLE output to       : {settings['io']['MLE_directory']}")
     print(f"  Loading spots from          : {traj_csv}")
 
-    spots = pd.read_csv(traj_csv)
+    spots = pd.read_csv(traj_csv, comment="#")
 
     # Keep all trajectories at this step (no length filter yet)
 
@@ -123,22 +125,28 @@ def run_saspt(traj_csv: str, settings: dict) -> None:
             "after min_I0 filtering (movie too short/sparse to fit a state array); "
             "skipping SASPT and writing empty MLE/posterior output."
         )
+        os.makedirs(settings["io"]["MLE_directory"], exist_ok=True)
+        os.makedirs(settings["io"]["post_directory"], exist_ok=True)
         basename = os.path.basename(traj_csv)
-        pd.DataFrame(
-            columns=["orig_trajectory", "track_length", "MLE_D", "source_file"]
-        ).to_csv(
+        write_csv_with_metadata_header(
+            pd.DataFrame(
+                columns=["orig_trajectory", "track_length", "MLE_D", "source_file"]
+            ),
             os.path.join(settings["io"]["MLE_directory"], basename.replace("_traj", "_MLE")),
-            index=False,
+            settings,
+            source=traj_csv,
         )
-        pd.DataFrame(
-            {
-                "D": settings["saspt"]["diff_coefs"],
-                "density": np.zeros(len(settings["saspt"]["diff_coefs"])),
-                "file": basename,
-            }
-        ).to_csv(
+        write_csv_with_metadata_header(
+            pd.DataFrame(
+                {
+                    "D": settings["saspt"]["diff_coefs"],
+                    "density": np.zeros(len(settings["saspt"]["diff_coefs"])),
+                    "file": basename,
+                }
+            ),
             os.path.join(settings["io"]["post_directory"], basename.replace("_traj", "_posterior")),
-            index=False,
+            settings,
+            source=traj_csv,
         )
         return
 
@@ -174,14 +182,22 @@ def run_saspt(traj_csv: str, settings: dict) -> None:
     )
 
     print("  Exporting data")
+    os.makedirs(settings["io"]["MLE_directory"], exist_ok=True)
+    os.makedirs(settings["io"]["post_directory"], exist_ok=True)
     basename = os.path.basename(traj_csv)
     MLE_filename = basename.replace("_traj", "_MLE")
-    MLE_df.to_csv(
-        os.path.join(settings["io"]["MLE_directory"], MLE_filename), index=False
+    write_csv_with_metadata_header(
+        MLE_df,
+        os.path.join(settings["io"]["MLE_directory"], MLE_filename),
+        settings,
+        source=traj_csv,
     )
     posterior_filename = basename.replace("_traj", "_posterior")
-    softD_df.to_csv(
-        os.path.join(settings["io"]["post_directory"], posterior_filename), index=False
+    write_csv_with_metadata_header(
+        softD_df,
+        os.path.join(settings["io"]["post_directory"], posterior_filename),
+        settings,
+        source=traj_csv,
     )
 
 
@@ -230,7 +246,7 @@ def run_rolling_windows(traj_csv: str, settings: dict) -> pd.DataFrame:
 
     basename = os.path.basename(traj_csv).replace(".csv", "")
 
-    df = pd.read_csv(traj_csv)
+    df = pd.read_csv(traj_csv, comment="#")
     df["ur_trajectory"] = df["trajectory"].apply(lambda t: f"{basename}::{t}")
 
     # Keep all trajectories in rolling-windows analysis
@@ -279,6 +295,7 @@ def run_rolling_windows(traj_csv: str, settings: dict) -> pd.DataFrame:
     new_df = new_df[merge_key + ["MLE_D"]]
 
     output_file = basename.replace("_traj", "_rollingMLE") + ".csv"
+    os.makedirs(settings["io"]["rolling_window_directory"], exist_ok=True)
     output_file = os.path.join(settings["io"]["rolling_window_directory"], output_file)
     new_df.to_csv(output_file, index=False)
 
@@ -290,10 +307,19 @@ def run_rolling_windows(traj_csv: str, settings: dict) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def run_filewise(nd2_path: str, settings: dict) -> None:
-    """Run tracking + SASPT + rolling windows on one .nd2 file.
+    """Run tracking (+ SASPT + rolling windows, for fastSPT only) on one .nd2 file.
 
     This is the single entry point called for each file, either from
     :mod:`run_local` or from the Snakemake ``filewise`` rule.
+
+    ``settings["io"]["mode"]`` (set by
+    :func:`~core.settings.update_settings_with_image_metadata` from this
+    file's own frame interval, or forced via ``--force-fastSPT``/
+    ``--force-slowSPT``) decides how much runs: slowSPT stops after
+    tracking -- SASPT and rolling-window analysis are for fastSPT's
+    per-HMM-state survival curve and diffusion-state plots, neither of which
+    a slowSPT run needs, so skipping them means ``posterior/``, ``MLE/``,
+    and ``rolling_windows/`` are never even created for a slowSPT run.
 
     Parameters
     ----------
@@ -313,6 +339,10 @@ def run_filewise(nd2_path: str, settings: dict) -> None:
         # localize_file(); nothing downstream can run without a traj_csv.
         print(f"WARNING: tracking failed for {os.path.basename(nd2_path)}: {e}")
         print("  Skipping SASPT and rolling windows for this file.")
+        return
+
+    if settings["io"]["mode"] == "slowSPT":
+        print(f"\n  Done: {os.path.basename(nd2_path)} (slowSPT: tracking only)")
         return
 
     print("\n  Executing SASPT")

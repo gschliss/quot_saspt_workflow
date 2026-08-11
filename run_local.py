@@ -3,7 +3,9 @@ run_local.py — Sequential local runner (no SLURM required).
 
 Usage
 -----
-    python run_local.py --input_directory /path/to/nd2s [--force] [--mode all|track|condition|aggregate]
+    python run_local.py --input_directory /path/to/nd2s \\
+        [--set quot.detect.t=10.0 --set quot.track.search_radius=0.1 ...] \\
+        [--force] [--mode all|track|condition|aggregate]
 
 Modes
 -----
@@ -14,6 +16,13 @@ all         track → condition → aggregate  (default)
 
 The --force flag re-processes all .nd2 files even if their outputs already
 exist.
+
+Settings come only from code defaults plus any --set overrides given here --
+this never reads a settings_override.yaml from --input_directory. Overrides
+are frozen into <analysis_directory>/settings_override.yaml for provenance
+(see core.settings.resolve_and_freeze_override), where <analysis_directory>
+is this run's own ``tracking_output_q=<t>/`` folder, not shared with any
+other run.
 """
 
 from __future__ import annotations
@@ -31,11 +40,16 @@ sys.path.insert(0, _HERE)
 
 import core  # noqa: F401  — boots fastQuot sys.path insert
 from core import _apply_gpu_settings, _report_gpu_status
-from core.settings import load_settings, update_settings_with_image_metadata, print_nested_dict
+from core.settings import (
+    build_override_from_args,
+    resolve_and_freeze_override,
+    update_settings_with_image_metadata,
+    print_nested_dict,
+)
 from core.utils import group_files_by_metadata, identify_missing_filewise
 from core.filewise import run_filewise
 from core.conditionwise import run_conditionwise
-from core.aggregate import run_aggregate
+from core.aggregate import run_aggregate, run_aggregate_survival_by_exposure
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +64,14 @@ def _parse_args() -> argparse.Namespace:
         "--input_directory",
         required=True,
         help="Absolute path to the folder containing .nd2 files.",
+    )
+    parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Dotted settings key=value, repeatable (e.g. --set quot.detect.t=10.0).",
     )
     parser.add_argument(
         "--force",
@@ -83,7 +105,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Load and persist settings
     # ------------------------------------------------------------------
-    settings = load_settings(data_directory)
+    overrides = build_override_from_args(args.overrides)
+    settings = resolve_and_freeze_override(data_directory, overrides)
     _apply_gpu_settings(settings)
     print(f"  {_report_gpu_status()}\n")
 
@@ -140,6 +163,7 @@ def main() -> None:
     if args.mode in ("all", "aggregate"):
         print("\n--- Aggregate cross-condition plots ---")
         run_aggregate(settings)
+        run_aggregate_survival_by_exposure(settings, min_length=2)
 
     print("\nDone.")
 

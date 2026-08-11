@@ -5,14 +5,21 @@ All settings logic:
 - Default settings definition (get_default_settings)
 - Directory-layout expansion (update_default_settings_for_analysis)
 - Image-metadata updates (update_settings_with_image_metadata)
-- Convenience loader that wires all three steps together (load_settings)
-- Utility helpers: deep_update, print_nested_dict
+- Loader that wires the above together given an explicit override file
+  (load_settings)
+- Command-line-driven override construction and freezing (
+  build_override_from_args, resolve_and_freeze_override) -- the entry point
+  for prepare_run.py and run_local.py. Every run's override file lives in
+  that run's own analysis directory, never in data_directory, so unrelated
+  concurrent runs never share a mutable settings file.
+- Utility helpers: deep_update, settings_equal, print_nested_dict
 """
 
 from __future__ import annotations
 
 import os
 import glob
+import sys
 import yaml
 import numpy as np
 import pims
@@ -49,6 +56,37 @@ def deep_update(d: dict, u: dict) -> None:
             d[k] = v
 
 
+def settings_equal(a, b) -> bool:
+    """Deep-compare two settings values, treating numpy arrays element-wise.
+
+    Plain ``==``/``!=`` on a dict containing ndarray values (e.g.
+    ``saspt.diff_coefs``) raises ``ValueError: truth value of an array
+    ... is ambiguous``, so this recurses manually instead.
+
+    Float arrays are compared with ``np.allclose`` rather than exact
+    ``np.array_equal``: values like ``diff_coefs``/``loc_errors`` are
+    recomputed via ``np.power``/``np.linspace`` in every fresh process, and
+    on a heterogeneous cluster a settings.pkl frozen on one compute node's
+    CPU can differ from a freshly-resolved array on a different node's CPU
+    in the last bit or two -- exact equality produced real, reproducible
+    (not merely transient) false-positive mismatches across nodes in
+    practice (confirmed 2026-07-17: a job on sh04-14n21 disagreed with a
+    settings.pkl frozen on an sh02 node, despite an unmodified override
+    file). A tolerant comparison still catches any actual, intended
+    settings change (e.g. a different search_radius), which differs by far
+    more than floating-point noise.
+    """
+    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+        if not (isinstance(a, np.ndarray) and isinstance(b, np.ndarray)):
+            return False
+        if np.issubdtype(a.dtype, np.floating) and np.issubdtype(b.dtype, np.floating):
+            return a.shape == b.shape and np.allclose(a, b, rtol=1e-9, atol=1e-12)
+        return np.array_equal(a, b)
+    if isinstance(a, dict) and isinstance(b, dict):
+        return set(a) == set(b) and all(settings_equal(a[k], b[k]) for k in a)
+    return a == b
+
+
 def print_nested_dict(d: dict, indent: int = 0, file=None) -> None:
     """Pretty-print a nested dict, optionally writing to a file path or object."""
     should_close = False
@@ -82,6 +120,16 @@ def get_default_settings() -> dict:
     settings["plot"] = {}
 
     # -- I/O ------------------------------------------------------------------
+    # slowSPT vs fastSPT is auto-detected from each file/condition's own
+    # frame_interval (set in update_settings_with_image_metadata): a frame
+    # interval above slow_spt_threshold_s means slowSPT (quot + a raw-
+    # trajectory survival curve only, no SASPT/HMM/movies). force_mode
+    # overrides that auto-detection when set via --force-fastSPT/
+    # --force-slowSPT (see prepare_run.py / run_local.py) -- unlike
+    # slow_spt_threshold_s, force_mode is not exposed as a generic --set key
+    # so it can't be silently tweaked mid-sweep the way the threshold can.
+    settings["io"]["slow_spt_threshold_s"] = 2.0
+    settings["io"]["force_mode"] = None
     settings["io"]["home_directory"] = ""
     settings["io"]["data_directory"] = ""       # set at runtime by load_settings
     settings["io"]["code_directory"] = ""       # set at runtime
@@ -98,17 +146,17 @@ def get_default_settings() -> dict:
     # -- quot detect ----------------------------------------------------------
     settings["quot"]["detect"] = {}
     settings["quot"]["detect"]["method"] = "llr"
-    settings["quot"]["detect"]["k"] = 2.0
+    settings["quot"]["detect"]["k"] = 15.0
     settings["quot"]["detect"]["w"] = 15
     settings["quot"]["detect"]["t"] = 20.00
 
     # -- quot localize --------------------------------------------------------
     settings["quot"]["localize"] = {}
     settings["quot"]["localize"]["method"] = "ls_int_gaussian"
-    settings["quot"]["localize"]["window_size"] = 15
-    settings["quot"]["localize"]["sigma"] = 2.5
-    settings["quot"]["localize"]["ridge"] = 0.00001
-    settings["quot"]["localize"]["max_iter"] = 50
+    settings["quot"]["localize"]["window_size"] = 11
+    settings["quot"]["localize"]["sigma"] = 1.5
+    settings["quot"]["localize"]["ridge"] = 0.0000001
+    settings["quot"]["localize"]["max_iter"] = 100
     settings["quot"]["localize"]["damp"] = 1
     settings["quot"]["localize"]["camera_bg"] = 100
 
@@ -157,7 +205,9 @@ def get_default_settings() -> dict:
 # Directory layout expansion
 # ---------------------------------------------------------------------------
 
-def update_default_settings_for_analysis(settings: dict, data_directory: str) -> dict:
+def update_default_settings_for_analysis(
+    settings: dict, data_directory: str, analysis_directory: str | None = None
+) -> dict:
     """Populate all derivative I/O paths in *settings* and create directories.
 
     Parameters
@@ -166,7 +216,16 @@ def update_default_settings_for_analysis(settings: dict, data_directory: str) ->
         Settings dict (mutated in-place and also returned).
     data_directory:
         Absolute path to the folder containing .nd2 files.  All analysis
-        output is placed in a sibling directory next to it.
+        output is placed in a sibling directory next to it (unless
+        *analysis_directory* is given explicitly).
+    analysis_directory:
+        If given, used as-is instead of deriving a ``tracking_output_q=...``
+        name from ``settings['quot']['detect']['t']``. Callers that already
+        know which analysis directory they're operating on (e.g. the
+        Snakefile, told explicitly via ``config['analysis_directory']``)
+        should always pass this, so the directory a job actually writes to
+        never depends on re-deriving it from settings resolved in that same
+        call -- see :func:`resolve_and_freeze_override`.
     """
     settings["io"]["data_directory"] = data_directory
     settings["io"]["home_directory"] = os.path.dirname(data_directory)
@@ -176,13 +235,15 @@ def update_default_settings_for_analysis(settings: dict, data_directory: str) ->
         os.path.dirname(os.path.abspath(__file__))
     )
 
-    traj_filestring = (
-        f"tracking_output_q="
-        f"{str(float(settings['quot']['detect']['t'])).replace('.', 'p')}"
-    )
-    settings["io"]["analysis_directory"] = os.path.join(
-        settings["io"]["home_directory"], traj_filestring
-    )
+    if analysis_directory is None:
+        traj_filestring = (
+            f"tracking_output_q="
+            f"{str(float(settings['quot']['detect']['t'])).replace('.', 'p')}"
+        )
+        analysis_directory = os.path.join(
+            settings["io"]["home_directory"], traj_filestring
+        )
+    settings["io"]["analysis_directory"] = analysis_directory
     settings["io"]["traj_directory"] = os.path.join(
         settings["io"]["analysis_directory"], "trajectories"
     )
@@ -208,17 +269,16 @@ def update_default_settings_for_analysis(settings: dict, data_directory: str) ->
         settings["io"]["analysis_directory"], "movies"
     )
 
-    settings["quot"]["filter"]["start"] = 0
-
+    # Only create the directories every mode actually writes into. slowSPT
+    # never touches post_directory/MLE_directory/rolling_window_directory/
+    # movie_directory, and split_directory/split_traj_directory are unused by
+    # the pipeline entirely (split_image_stack/save_tiles in core/utils.py are
+    # standalone helpers, never called from filewise/conditionwise/aggregate) --
+    # each of those is created lazily, right before its first write, by the
+    # function that actually writes into it.
     os.makedirs(settings["io"]["analysis_directory"], exist_ok=True)
     os.makedirs(settings["io"]["traj_directory"], exist_ok=True)
-    os.makedirs(settings["io"]["post_directory"], exist_ok=True)
-    os.makedirs(settings["io"]["MLE_directory"], exist_ok=True)
     os.makedirs(settings["io"]["plot_directory"], exist_ok=True)
-    os.makedirs(settings["io"]["split_directory"], exist_ok=True)
-    os.makedirs(settings["io"]["split_traj_directory"], exist_ok=True)
-    os.makedirs(settings["io"]["rolling_window_directory"], exist_ok=True)
-    os.makedirs(settings["io"]["movie_directory"], exist_ok=True)
 
     return settings
 
@@ -258,9 +318,10 @@ def update_settings_with_image_metadata(
         Settings dict (mutated in-place and also returned).
     cond:
         If provided (and *nd2_path* is not), glob for ``*{cond}*.nd2`` inside
-        the data directory and use the first match as a representative file.
-        If neither *cond* nor *nd2_path* is given, use the first .nd2 file
-        found in the data directory.
+        the data directory and use the first openable match as a
+        representative file (unreadable/corrupt files are skipped). If
+        neither *cond* nor *nd2_path* is given, use the first openable .nd2
+        file found in the data directory.
     nd2_path:
         If provided, read metadata directly from this exact file instead of
         an arbitrary representative file. This is what the filewise rule
@@ -268,15 +329,37 @@ def update_settings_with_image_metadata(
         even if they differ within a condition.
     """
     if nd2_path is not None:
-        image_path = nd2_path
+        candidates = [nd2_path]
     elif cond is None:
-        image_path = glob.glob(f"{settings['io']['data_directory']}/*.nd2")[0]
+        candidates = sorted(glob.glob(f"{settings['io']['data_directory']}/*.nd2"))
     else:
-        image_path = glob.glob(
-            f"{settings['io']['data_directory']}/*{cond}*.nd2"
-        )[0]
+        candidates = sorted(
+            glob.glob(f"{settings['io']['data_directory']}/*{cond}*.nd2")
+        )
 
-    img = pims.open(image_path)
+    img = None
+    image_path = None
+    skipped = []
+    for candidate in candidates:
+        try:
+            img = pims.open(candidate)
+            image_path = candidate
+            break
+        except Exception as e:
+            skipped.append((candidate, e))
+
+    if img is None:
+        raise RuntimeError(
+            f"Could not open any .nd2 file as a representative for metadata "
+            f"(cond={cond!r}, nd2_path={nd2_path!r}). Tried: "
+            + "; ".join(f"{os.path.basename(c)}: {e}" for c, e in skipped)
+        )
+
+    for candidate, e in skipped:
+        print(
+            f"WARNING: skipping unreadable representative-file candidate "
+            f"{os.path.basename(candidate)} ({e}); trying the next match."
+        )
     frame = img[0]
     bg_level = np.median(frame)
     dt = 1 / img.frame_rate
@@ -295,6 +378,23 @@ def update_settings_with_image_metadata(
     settings["saspt"]["frame_interval"] = dt
     settings["quot"]["track"]["pixel_size_um"] = pixel_size_um
     settings["saspt"]["pixel_size_um"] = pixel_size_um
+
+    # -- slowSPT vs fastSPT mode -------------------------------------------
+    detected_mode = (
+        "slowSPT" if dt > settings["io"]["slow_spt_threshold_s"] else "fastSPT"
+    )
+    settings["io"]["detected_mode"] = detected_mode
+    force_mode = settings["io"].get("force_mode")
+    if force_mode is not None:
+        settings["io"]["mode"] = force_mode
+        if force_mode != detected_mode:
+            print(
+                f"NOTE: {image_path} has frame_interval={dt:g}s, which would "
+                f"auto-detect as {detected_mode!r}, but force_mode={force_mode!r} "
+                "is set; using the forced mode."
+            )
+    else:
+        settings["io"]["mode"] = detected_mode
 
     # -- bit-depth-aware min_I0 -------------------------------------------
     # min_I0 (spot-amplitude threshold) is calibrated by default against a
@@ -326,37 +426,47 @@ def update_settings_with_image_metadata(
 # Convenience loader
 # ---------------------------------------------------------------------------
 
-def load_settings(data_directory: str) -> dict:
+def load_settings(
+    data_directory: str, override_path: str, analysis_directory: str | None = None
+) -> dict:
     """Build a fully-resolved settings dict for *data_directory*.
 
     Steps:
     1. Start with ``get_default_settings()``.
-    2. Look for ``settings_override.yaml`` inside *data_directory*; if found,
-       merge it with ``deep_update``.
-    3. Call ``update_default_settings_for_analysis(settings, data_directory)``
-       to expand all derivative I/O paths and create output directories.
+    2. If *override_path* exists, merge it in with ``deep_update``.
+    3. Call ``update_default_settings_for_analysis(settings, data_directory,
+       analysis_directory)`` to expand all derivative I/O paths and create
+       output directories.
     4. Return the fully-populated settings dict.
 
-    The ``settings_override.yaml`` file must live in the same directory as
-    the .nd2 files.  It must not (and need not) specify ``io.data_filepath``
-    or any other path — the data directory is always taken from the argument
-    passed to this function.
+    *override_path* is always explicit -- this function does NOT look inside
+    *data_directory* for a ``settings_override.yaml`` on its own. A run's
+    override file should live in that run's own analysis directory (see
+    :func:`resolve_and_freeze_override`, which creates it there), not in
+    *data_directory* -- a shared, mutable file next to the raw data is what
+    let unrelated concurrent runs stomp on each other's settings by editing
+    it out from under an already-dispatched sweep.
 
     Parameters
     ----------
     data_directory:
         Absolute path to the folder that contains .nd2 files.
+    override_path:
+        Absolute path to the YAML override file for this specific run.
+        Read if it exists; not an error if it doesn't (a run with no
+        explicit overrides is valid).
+    analysis_directory:
+        Passed through to :func:`update_default_settings_for_analysis`.
     """
     settings = get_default_settings()
 
-    override_path = os.path.join(data_directory, "settings_override.yaml")
     if os.path.exists(override_path):
         with open(override_path) as fh:
             override_cfg = yaml.load(fh, Loader=yaml.FullLoader)
-        deep_update(settings, override_cfg)
-        print(f"Applied settings overrides from {override_path}")
+        deep_update(settings, override_cfg or {})
+        print(f"Applied settings overrides from {override_path}", file=sys.stderr)
 
-    update_default_settings_for_analysis(settings, data_directory)
+    update_default_settings_for_analysis(settings, data_directory, analysis_directory)
 
     # Snapshot the user-configured (default-or-override) min_I0 *before* any
     # per-file bit-depth rescaling happens in update_settings_with_image_metadata.
@@ -364,5 +474,70 @@ def load_settings(data_directory: str) -> dict:
     # stray kwarg into quot's track_file()/track() calls, which pass
     # settings["quot"] / settings["quot"]["track"] straight through as **kwargs.
     settings["io"]["_min_I0_baseline"] = settings["quot"]["track"]["min_I0"]
+
+    return settings
+
+
+# ---------------------------------------------------------------------------
+# Command-line-driven override construction
+# ---------------------------------------------------------------------------
+
+def build_override_from_args(set_args: list[str]) -> dict:
+    """Parse ``["quot.detect.t=10.0", "quot.track.search_radius=0.1"]`` into
+    a nested override dict: ``{"quot": {"detect": {"t": 10.0}, "track":
+    {"search_radius": 0.1}}}``.
+
+    Each value is parsed with ``yaml.safe_load`` for the same scalar
+    coercion a hand-written override YAML file would get (``"10.0"`` ->
+    float, ``"true"`` -> bool, ``"[1,2,3]"`` -> list, anything else -> str).
+    """
+    override: dict = {}
+    for item in set_args:
+        if "=" not in item:
+            raise ValueError(f"--set expects <dotted.key>=<value>, got: {item!r}")
+        key_path, raw_value = item.split("=", 1)
+        value = yaml.safe_load(raw_value)
+
+        node = override
+        parts = key_path.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = value
+    return override
+
+
+def resolve_and_freeze_override(data_directory: str, overrides: dict) -> dict:
+    """Resolve settings from *overrides* + code defaults, create this run's
+    analysis directory, and persist *overrides* there as
+    ``<analysis_directory>/settings_override.yaml`` -- the durable, per-run
+    location every later reparse (see the Snakefile) reads from instead of
+    anything inside *data_directory*.
+
+    Only the explicit *overrides* are written, not the full resolved
+    settings dict -- same convention as a hand-written override file, so a
+    later code-default change is still picked up on --forceall re-resolution
+    instead of being frozen in by accident.
+
+    Parameters
+    ----------
+    data_directory:
+        Absolute path to the folder that contains .nd2 files.
+    overrides:
+        Nested override dict, e.g. from :func:`build_override_from_args`.
+
+    Returns
+    -------
+    The fully-resolved settings dict (also used to create/locate all
+    analysis-directory subdirectories via `update_default_settings_for_analysis`).
+    """
+    settings = get_default_settings()
+    deep_update(settings, overrides)
+    update_default_settings_for_analysis(settings, data_directory)
+    settings["io"]["_min_I0_baseline"] = settings["quot"]["track"]["min_I0"]
+
+    override_path = os.path.join(settings["io"]["analysis_directory"], "settings_override.yaml")
+    with open(override_path, "w") as fh:
+        yaml.dump(overrides, fh, default_flow_style=False, sort_keys=False)
+    print(f"Wrote settings overrides to {override_path}", file=sys.stderr)
 
     return settings

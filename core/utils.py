@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import copy
 import subprocess
 import glob as _glob
 from collections import defaultdict
@@ -85,7 +86,16 @@ def identify_missing_filewise(settings: dict, force: bool = False) -> dict[str, 
     if force:
         return nd2_files_by_condition
 
-    # Build the expected output paths for every input file
+    from core.settings import update_settings_with_image_metadata
+
+    # Build the expected output paths for every input file. A slowSPT file
+    # (see core/filewise.py) only ever produces a _traj.csv -- checking for
+    # posterior/MLE/rollingMLE on one would always report it "missing" and
+    # reprocess it on every invocation, since those are never written for a
+    # slowSPT run. Mode is detected the same way core/filewise.py itself
+    # does, on a throwaway settings copy so this peek doesn't disturb the
+    # caller's settings dict (the real per-file update happens again, on the
+    # actual settings dict, right before run_filewise).
     target_files: dict[str, list[str]] = {}
     for condition, file_list in nd2_files_by_condition.items():
         target_list: list[str] = []
@@ -94,17 +104,23 @@ def identify_missing_filewise(settings: dict, force: bool = False) -> dict[str, 
             target_list.append(
                 os.path.join(settings["io"]["traj_directory"], base + "_traj.csv")
             )
-            target_list.append(
-                os.path.join(settings["io"]["post_directory"], base + "_posterior.csv")
+
+            peek_settings = copy.deepcopy(settings)
+            update_settings_with_image_metadata(
+                peek_settings, nd2_path=os.path.join(data_directory, f)
             )
-            target_list.append(
-                os.path.join(settings["io"]["MLE_directory"], base + "_MLE.csv")
-            )
-            target_list.append(
-                os.path.join(
-                    settings["io"]["rolling_window_directory"], base + "_rollingMLE.csv"
+            if peek_settings["io"]["mode"] == "fastSPT":
+                target_list.append(
+                    os.path.join(settings["io"]["post_directory"], base + "_posterior.csv")
                 )
-            )
+                target_list.append(
+                    os.path.join(settings["io"]["MLE_directory"], base + "_MLE.csv")
+                )
+                target_list.append(
+                    os.path.join(
+                        settings["io"]["rolling_window_directory"], base + "_rollingMLE.csv"
+                    )
+                )
         target_files[condition] = target_list
 
     # Identify which expected outputs are absent
@@ -159,8 +175,75 @@ def aggregate_csv(directory_string: str, filter_string: str = "*.csv") -> pd.Dat
     """
     csv_dir = Path(directory_string)
     csv_files = sorted(csv_dir.glob(filter_string))
-    df_list = [pd.read_csv(f) for f in csv_files]
+    df_list = [pd.read_csv(f, comment="#") for f in csv_files]
     return pd.concat(df_list, ignore_index=True)
+
+
+# ---------------------------------------------------------------------------
+# Metadata header (auditing)
+# ---------------------------------------------------------------------------
+
+def _format_metadata_value(value) -> str:
+    """Render a settings value as a single-line string for the CSV header."""
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return "[]"
+        return f"min={value.min():.4g}, max={value.max():.4g}, n={value.size}"
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
+
+
+def _flatten_dict(d: dict, prefix: str = "") -> list[tuple[str, object]]:
+    items: list[tuple[str, object]] = []
+    for key, value in d.items():
+        full_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            items.extend(_flatten_dict(value, full_key))
+        else:
+            items.append((full_key, value))
+    return items
+
+
+def metadata_header_lines(settings: dict, source: str | None = None) -> list[str]:
+    """Build human-readable audit lines describing the settings used to
+    produce a given output file (pixel size, imaging interval, and every
+    other ``quot``/``saspt`` parameter). Meant to be written as ``#``-prefixed
+    comment lines at the top of a trajectory/posterior/MLE CSV -- for
+    auditing only, never read back by the pipeline itself.
+    """
+    lines = ["quot_saspt_workflow run metadata (for auditing only)"]
+    if source is not None:
+        lines.append(f"generated_from: {source}")
+    for section in ("quot", "saspt"):
+        for key, value in _flatten_dict(settings[section]):
+            lines.append(f"{section}.{key}: {_format_metadata_value(value)}")
+    return lines
+
+
+def write_csv_with_metadata_header(
+    df: pd.DataFrame, path: str, settings: dict, source: str | None = None, index: bool = False
+) -> None:
+    """Write *df* to *path* as CSV, preceded by a ``#``-commented metadata header."""
+    with open(path, "w", newline="") as fh:
+        for line in metadata_header_lines(settings, source=source):
+            fh.write(f"# {line}\n")
+        df.to_csv(fh, index=index)
+
+
+def prepend_metadata_header(path: str, settings: dict, source: str | None = None) -> None:
+    """Prepend a ``#``-commented metadata header to an already-written CSV at *path*.
+
+    Used for files written by code with no header hook (e.g. quot's own
+    ``track_file``, which calls ``DataFrame.to_csv`` internally) -- the file
+    is read back once it's fully written, then rewritten with the header on top.
+    """
+    with open(path, "r") as fh:
+        original = fh.read()
+    header = "".join(f"# {line}\n" for line in metadata_header_lines(settings, source=source))
+    with open(path, "w") as fh:
+        fh.write(header)
+        fh.write(original)
 
 
 # ---------------------------------------------------------------------------

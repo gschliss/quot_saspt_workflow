@@ -120,6 +120,7 @@ At startup the script prints which GPU (if any) is in use, then runs the full pi
 | Flag | Default | Description |
 |---|---|---|
 | `--input_directory` | *(required)* | Folder containing `.nd2` files |
+| `--set` | *(none)* | Dotted settings override, repeatable — e.g. `--set quot.detect.t=10.0` |
 | `--mode` | `all` | `track`, `condition`, `aggregate`, or `all` |
 | `--force` | off | Re-run even if output files already exist |
 
@@ -140,53 +141,36 @@ python run_local.py --input_directory /path/to/nd2s --mode aggregate
 
 ## Settings override
 
-Drop a `settings_override.yaml` in the **same folder as your `.nd2` files** to override any default parameter. The file is optional — sensible defaults are used if it is absent. You do **not** need to specify any file paths; the data directory is inferred from where the YAML lives.
+Settings come from code defaults plus any `--set key.path=value` overrides you pass on the command line — there is no `settings_override.yaml` to hand-edit in the `.nd2` folder. Each run's resolved overrides are frozen into `<analysis_directory>/settings_override.yaml` (e.g. `tracking_output_q=10p0/settings_override.yaml`) purely for provenance/audit — that file lives inside the run's own output directory, never shared with any other run, so sweeping over several thresholds (or anything else) never risks one run's edits landing on another run's already-dispatched jobs.
+
+`--set` is repeatable and accepts any dotted path into the settings tree, with the value parsed the same way a YAML scalar would be (`10.0` → float, `true` → bool, `[1,2,3]` → list, anything else → string):
+
+```bash
+python run_local.py --input_directory /path/to/nd2s \
+    --set quot.detect.t=10.0 \
+    --set quot.track.search_radius=0.1
+```
+
+For a cluster sweep, the same `--set` flags go to `prepare_run.py` (see [HPC / SLURM](#hpc--slurm) below).
 
 **Example for fast SPT (~250 Hz, diffraction-limited spots):**
 
-```yaml
-quot:
-  detect:
-    t: 20.0          # detection threshold (lower = more spots, higher = fewer false positives)
-    w: 15             # LLR filter window size (pixels); should be ~3× PSF diameter
-  localize:
-    window_size: 15   # fitting window (pixels); match to w above
-    sigma: 2.5        # expected PSF sigma (pixels)
-    max_iter: 10
-  track:
-    method: euclidean
-    search_radius: 1.2   # maximum linking distance (μm)
-    min_I0: 100.0
-
-plot:
-  ylim: [0, 5]
-  barGraphBreaks: [0, 0.05, 0.35, 2, 100]   # D bin boundaries (μm²/s)
-  barGraphLabels: [Immobile, Confined, Membrane, Free]
-  mult_on_sd: 3.0    # outlier-rejection threshold (KS-distance SDs from mean)
-
-saspt:
-  focal_depth: 0.7   # depth of field (μm); see your objective spec
-  splitsize: 5       # rolling-window half-width (frames)
+```bash
+--set quot.detect.t=20.0 --set quot.detect.w=15 \
+--set quot.localize.window_size=15 --set quot.localize.sigma=2.5 --set quot.localize.max_iter=10 \
+--set quot.track.method=euclidean --set quot.track.search_radius=1.2 --set quot.track.min_I0=100.0 \
+--set "plot.ylim=[0,5]" --set "plot.barGraphBreaks=[0, 0.05, 0.35, 2, 100]" \
+--set "plot.barGraphLabels=[Immobile, Confined, Membrane, Free]" --set plot.mult_on_sd=3.0 \
+--set saspt.focal_depth=0.7 --set saspt.splitsize=5
 ```
 
 **Example for slow SPT (~1–10 Hz, single-molecule bleaching):**
 
-```yaml
-quot:
-  detect:
-    t: 15.0
-    w: 11
-  localize:
-    window_size: 7
-    max_iter: 10
-    damp: 1
-  track:
-    method: conservative
-    search_radius: 0.15
-    min_I0: 200.0
-
-plot:
-  bleach_xlim: [-125000, 25000]
+```bash
+--set quot.detect.t=15.0 --set quot.detect.w=11 \
+--set quot.localize.window_size=7 --set quot.localize.max_iter=10 --set quot.localize.damp=1 \
+--set quot.track.method=conservative --set quot.track.search_radius=0.15 --set quot.track.min_I0=200.0 \
+--set "plot.bleach_xlim=[-125000, 25000]"
 ```
 
 ### All available settings
@@ -195,12 +179,12 @@ plot:
 |---|---|---|
 | `quot.detect.method` | `llr` | Detection method (`llr`, `dog`, `log`, `gauss`, …) |
 | `quot.detect.t` | `20.0` | Detection threshold |
-| `quot.detect.k` | `2.0` | Gaussian kernel sigma for LLR filter |
+| `quot.detect.k` | `15.0` | Gaussian kernel sigma for LLR filter |
 | `quot.detect.w` | `15` | Window size for LLR filter (pixels) |
 | `quot.localize.method` | `ls_int_gaussian` | Localization method |
-| `quot.localize.window_size` | `15` | Fitting subwindow (pixels) |
-| `quot.localize.sigma` | `2.5` | PSF sigma (pixels) |
-| `quot.localize.max_iter` | `50` | Max LM iterations |
+| `quot.localize.window_size` | `11` | Fitting subwindow (pixels) |
+| `quot.localize.sigma` | `1.5` | PSF sigma (pixels) |
+| `quot.localize.max_iter` | `100` | Max LM iterations |
 | `quot.localize.damp` | `1` | LM damping factor |
 | `quot.track.method` | `euclidean` | Linking method (`euclidean` or `conservative`) |
 | `quot.track.search_radius` | `1.2` | Max linking distance (μm) |
@@ -229,10 +213,9 @@ When PyTorch is installed and a CUDA GPU is present, two stages are automaticall
 
 The fallback is transparent — if PyTorch is absent or no CUDA device is found, the original scipy/numpy code runs unchanged.
 
-**To disable GPU** (e.g. for debugging), add to `settings_override.yaml`:
-```yaml
-gpu:
-  use_gpu: false
+**To disable GPU** (e.g. for debugging), add:
+```bash
+--set gpu.use_gpu=false
 ```
 
 ---
@@ -251,11 +234,12 @@ tracking_output_q=20p0/
 │   ├── plotting_pkls/      # Serialized per-condition data for aggregate step
 │   ├── <condition>_posterior.pdf    # Diffusion coefficient histogram
 │   ├── <condition>_bar.pdf          # Population fraction bar chart
-│   ├── <condition>_survival.pdf     # State survival curves (from HMM)
+│   ├── survival_curves/<condition>_survival.pdf  # Kaplan-Meier trajectory survival curve
 │   ├── aggregate_posterior.pdf      # All conditions overlaid
 │   └── aggregate_MLE_bar.pdf        # Cross-condition bar chart
 ├── movies/                 # Overlay MP4s of sampled trajectories
-├── settings.pkl            # Full settings dict (for reproducibility)
+├── settings_override.yaml  # This run's explicit overrides only (provenance)
+├── settings.pkl            # Full resolved settings dict (for reproducibility)
 └── settings.txt            # Human-readable settings summary
 ```
 
@@ -263,14 +247,35 @@ tracking_output_q=20p0/
 
 ## HPC / SLURM
 
-See `Snakefile` and `calling_scripts/` for cluster submission. The DAG parallelizes the per-file tracking stage as a job array and runs condition-wise and aggregate steps after all file jobs complete.
-
-Basic usage on a SLURM cluster:
+`prepare_run.py` resolves settings from `--set` overrides and creates a fresh
+`tracking_output_q=<t>/` analysis directory (same convention as `run_local.py`)
+*before* anything is submitted to SLURM — that directory, not the `.nd2`
+folder, is where this run's `settings_override.yaml` lives, and it's what the
+`Snakefile` reads on every job's reparse. Two runs (e.g. sweeping several
+thresholds) never share a mutable settings file, so nothing needs to be
+serialized between them.
 
 ```bash
-# Edit calling_scripts/command.sh to point to your data directory
-sbatch calling_scripts/command.sh
+ANALYSIS_DIR=$(python3 prepare_run.py /path/to/nd2_files \
+    --set quot.detect.t=10.0 --set quot.track.search_radius=0.1 \
+    --write-controller)
+sbatch "$ANALYSIS_DIR/run_snakemake_controller.slurm"
 ```
+
+`--write-controller` writes a ready-to-submit `run_snakemake_controller.slurm`
+into the analysis directory, with `--directory <analysis_directory>` (so this
+run's Snakemake lock/metadata never collides with a concurrent run's) and
+`--latency-wait 60` (NFS output-visibility latency on `$GROUP_HOME` can make
+the default 5s wait fail) already set. Pass `--forceall` through to an
+already-submitted controller to intentionally recompute everything after
+changing that run's own `settings_override.yaml`:
+
+```bash
+sbatch "$ANALYSIS_DIR/run_snakemake_controller.slurm" --forceall
+```
+
+The DAG parallelizes the per-file tracking stage as a job array and runs
+condition-wise and aggregate steps after all file jobs complete.
 
 ---
 

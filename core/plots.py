@@ -6,14 +6,18 @@ All plotting and visualisation functions, moved from plotFunctions.py.
 Includes:
 - Outlier detection (find_outlier_filenames, find_outlier_positions)
 - Posterior/MLE histogram plots (generate_posterior_plotting_df, generate_plots)
-- Trajectory survival curves (plot_survival_by_metadata, plot_survival_HMM)
-- Hidden Markov Model fitting (fitHMM)
-- Survival-curve helpers (run_lengths_to_survival_curve, get_runs)
+- Trajectory survival curves (compute_trajectory_durations, kaplan_meier,
+  plot_survival_kaplan_meier) -- Kaplan-Meier estimate straight from raw
+  _traj.csv files, right-censoring trajectories still alive at the last
+  observed frame instead of dropping them
+- Hidden Markov Model fitting (fitHMM) -- state assignment only; no longer
+  feeds a survival plot, just the HMM_output/<condition>_HMM.txt summary
+- Detections-per-trajectory QC histogram (plot_detections_histogram)
 - Movie / annotation helpers (isolate_traj, annotate_trajectory_building_tail,
   save_overlay_movie, save_overlay_tiff)
 - Bleaching-curve analysis (bleaching_curve, normalize_signal_by_baseline,
   aggregate_bleaching_data, plot_bleaching_curves)
-- Movie generation (generate_movies)
+- Movie generation (generate_movies, generate_fullfield_overlay_movie)
 - Trajectory scoring (trajectory_score_df, compute_runs_df)
 
 Note: The TrackMate/ImageJ block that existed in the original file has been
@@ -26,7 +30,6 @@ import os
 import re
 import glob
 import warnings
-from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -38,8 +41,6 @@ import imageio
 import pims
 from tifffile import imwrite
 from hmmlearn.hmm import GaussianHMM
-
-from core.utils import extract_metadata, wilson_ci
 
 warnings.filterwarnings("ignore")
 plt.rcParams["font.family"] = "DejaVu Sans"
@@ -275,177 +276,385 @@ def generate_plots(
 # Survival curves
 # ---------------------------------------------------------------------------
 
-def plot_survival_by_metadata(
-    settings: dict,
-    metadata_fields: list[str] | None = None,
-    subset: list[str] | None = None,
-    min_detections: int = 2,
-    xlim: float = 120,
-    title: str = "",
-) -> None:
-    """Plot trajectory survival curves grouped by filename metadata.
+def compute_trajectory_durations(traj_csv: str) -> pd.DataFrame:
+    """One row per trajectory in *traj_csv*: duration (frames elapsed since
+    first detection), number of detections, and whether it's right-censored
+    (its last detection is on the last frame observed anywhere in this file).
 
-    Metadata values are extracted from filenames using
-    :func:`~core.utils.extract_metadata`.
-
-    Parameters
-    ----------
-    settings:
-        Workflow settings dict.
-    metadata_fields:
-        List of metadata keys to look for in filenames (e.g. ``['send', 'rec']``).
-    subset:
-        Optional list of substrings; only files whose name contains one of these
-        substrings are included.
-    min_detections:
-        Minimum number of detections required for a trajectory to be counted.
-    xlim:
-        Upper x-axis limit (in the units of ``frame_interval``).
-    title:
-        Optional suffix appended to the output PDF filename.
+    Ported from the standalone ``playspace/survival_curve.py`` prototype.
     """
-    if metadata_fields is None:
-        metadata_fields = ["send", "rec"]
-    if subset is None:
-        subset = []
+    df = pd.read_csv(traj_csv, comment="#")
+    max_frame = df["frame"].max()
 
-    metadata_groups: dict[str, dict] = {field: defaultdict(list) for field in metadata_fields}
-
-    file_list = [
-        os.path.join(settings["io"]["traj_directory"], fi)
-        for fi in os.listdir(settings["io"]["traj_directory"])
-        if fi.endswith("csv")
-    ]
-    file_pattern = [re.sub(r"_\d{3}_traj\.csv$", "", f) for f in file_list]
-    file_pattern = list(dict.fromkeys(file_pattern))
-
-    for f in file_pattern:
-        metadata = extract_metadata(f, metadata_fields)
-        for field in metadata_fields:
-            if field in metadata:
-                metadata_groups[field][metadata[field]].append(f)
-
-    if subset:
-        for field in metadata_groups:
-            for key, files in metadata_groups[field].items():
-                filtered_files: list[str] = []
-                for sub in subset:
-                    filtered_files.extend(f for f in files if sub in f)
-                metadata_groups[field][key] = filtered_files
-
-    for field in metadata_groups:
-        empty_keys = [k for k, v in metadata_groups[field].items() if not v]
-        for k in empty_keys:
-            del metadata_groups[field][k]
-
-    for field in metadata_groups:
-        for value, patterns in metadata_groups[field].items():
-            plt.figure(figsize=(8, 5))
-            for p in patterns:
-                matching_files = glob.glob(p + "*.csv")
-                dat = pd.DataFrame()
-                for f in matching_files:
-                    newDat = pd.read_csv(f)
-                    newDat["trajectory"] = f"{f}::" + newDat["trajectory"].astype(str)
-                    dat = pd.concat([dat, newDat], ignore_index=True)
-                df_relative = dat.copy()
-                df_relative["frame_offset"] = df_relative["frame"] - df_relative.groupby(
-                    "trajectory"
-                )["frame"].transform("min")
-                df_relative = df_relative[
-                    df_relative["frame_offset"] >= (min_detections - 1)
-                ]
-                df_relative = df_relative.groupby("trajectory").filter(
-                    lambda g: g["I0"].mean() > settings["quot"]["track"]["min_I0"]
-                )
-
-                survival_counts = (
-                    df_relative.groupby("frame_offset")["trajectory"].nunique().sort_index()
-                )
-                total_trajectories = df_relative["trajectory"].nunique()
-
-                results = []
-                for frame_offset, n_alive in survival_counts.items():
-                    frac = n_alive / total_trajectories
-                    ci_low, ci_high = wilson_ci(n_alive, total_trajectories)
-                    results.append((frame_offset, frac, ci_low, ci_high))
-
-                survival_df = pd.DataFrame(
-                    results, columns=["relative_frame", "survival_prob", "ci_low", "ci_high"]
-                )
-                survival_df["time"] = (
-                    survival_df["relative_frame"] * settings["quot"]["track"]["frame_interval"]
-                )
-
-                label = os.path.basename(p)
-                plt.fill_between(
-                    survival_df["time"], survival_df["ci_low"], survival_df["ci_high"], alpha=0.3
-                )
-                plt.plot(survival_df["time"], survival_df["survival_prob"], label=label)
-
-            plotname = (
-                f"survival_by_{field}_{value}"
-                if title == ""
-                else f"survival_by_{field}_{value}_{title}"
-            )
-            plotfile = os.path.join(settings["io"]["plot_directory"], f"{plotname}.pdf")
-            plt.xlabel("Time (s)")
-            plt.ylabel("Survival probability")
-            plt.title(f"Survival curves — {field} = {value}")
-            plt.xlim(0, xlim)
-            plt.legend(fontsize="small")
-            plt.tight_layout()
-            plt.savefig(plotfile, dpi=300, format="pdf", bbox_inches="tight")
-            plt.close()
-            print(f"  Saved {os.path.basename(plotfile)}")
+    per_traj = df.groupby("trajectory")["frame"].agg(
+        first_frame="min", last_frame="max", n_detections="count"
+    )
+    per_traj["duration"] = per_traj["last_frame"] - per_traj["first_frame"]
+    per_traj["censored"] = per_traj["last_frame"] == max_frame
+    per_traj["source_file"] = os.path.basename(traj_csv)
+    return per_traj.reset_index()
 
 
-def run_lengths_to_survival_curve(
-    run_lengths, max_lag: int | None = None, min_run: int = 0
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Convert a list of run lengths to a survival curve with Wilson 95 % CIs.
+def kaplan_meier(durations: np.ndarray, censored: np.ndarray) -> pd.DataFrame:
+    """Kaplan-Meier survival estimate with a Greenwood's-formula 95% CI.
 
     Parameters
     ----------
-    run_lengths:
-        1-D array-like of integer run lengths.
-    max_lag:
-        Maximum Δt to compute (defaults to ``max(run_lengths)``).
-    min_run:
-        Exclude runs shorter than this value.
+    durations:
+        Observed time-to-event (or time-to-censoring) for each trajectory.
+    censored:
+        True where the corresponding duration is right-censored (the
+        trajectory was merely last SEEN alive at that time, not observed to
+        end).
 
     Returns
     -------
-    ``(survival_curve, ci_low, ci_high)`` — three 1-D numpy arrays indexed
-    by Δt.  All three are empty if there are no valid run lengths.
+    DataFrame with columns: time, at_risk, n_events, survival, ci_low, ci_high.
+    Starts with a ``time=0, survival=1`` row so the curve/plot anchors at
+    the origin.
     """
-    run_lengths = np.array(run_lengths)
-    run_lengths = run_lengths[run_lengths > min_run]
-    if len(run_lengths) == 0:
-        return np.array([]), np.array([]), np.array([])
-    if max_lag is None:
-        max_lag = int(run_lengths.max())
-    total = len(run_lengths)
-    survival_curve = np.zeros(max_lag)
-    ci_low = np.zeros(max_lag)
-    ci_high = np.zeros(max_lag)
-    for dt in range(max_lag):
-        n_alive = int(np.sum(run_lengths > dt))
-        survival_curve[dt] = n_alive / total
-        ci_low[dt], ci_high[dt] = wilson_ci(n_alive, total)
-    return survival_curve, ci_low, ci_high
+    n = len(durations)
+    event_times = np.unique(durations[~censored])
+
+    rows = [{"time": 0, "at_risk": n, "n_events": 0, "survival": 1.0, "ci_low": 1.0, "ci_high": 1.0}]
+    survival = 1.0
+    greenwood_sum = 0.0  # running sum of d / (n_at_risk * (n_at_risk - d))
+
+    for t in event_times:
+        n_at_risk = int(np.sum(durations >= t))
+        n_events = int(np.sum((durations == t) & (~censored)))
+        if n_at_risk == 0 or n_events == 0:
+            continue
+
+        survival *= 1 - n_events / n_at_risk
+        if n_at_risk > n_events:
+            greenwood_sum += n_events / (n_at_risk * (n_at_risk - n_events))
+
+        se = survival * np.sqrt(greenwood_sum)
+        rows.append({
+            "time": t,
+            "at_risk": n_at_risk,
+            "n_events": n_events,
+            "survival": survival,
+            "ci_low": max(0.0, survival - 1.96 * se),
+            "ci_high": min(1.0, survival + 1.96 * se),
+        })
+
+    return pd.DataFrame(rows)
 
 
-def get_runs(pops: np.ndarray, pop: int) -> np.ndarray:
-    """Return lengths of consecutive runs of state *pop* in the *pops* array."""
-    is_pop = (pops == pop).astype(int)
-    if len(is_pop) == 0:
-        return []
-    padded = np.pad(is_pop, (1, 1), mode="constant")
-    diff = np.diff(padded)
-    run_starts = np.where(diff == 1)[0]
-    run_ends = np.where(diff == -1)[0]
-    return run_ends - run_starts
+def plot_survival_kaplan_meier(
+    traj_csvs: list[str],
+    settings: dict,
+    label: str,
+    min_length: int = 2,
+    max_frame: int = 30,
+    showPlot: bool = False,
+) -> None:
+    """Kaplan-Meier trajectory survival curve straight from raw ``_traj.csv``
+    files -- one curve pooling every trajectory across all of *traj_csvs*.
+
+    Per trajectory, "survival time" is frames elapsed between its first and
+    last detection (the csv has no real timestamp). Trajectories whose last
+    detection lands on the last frame observed anywhere in their own source
+    file are right-censored (the movie just stopped recording, so we don't
+    know whether they really ended there) rather than dropped -- a censored
+    trajectory stays in the risk set up to its own last frame but isn't
+    counted as a "death" there, which is more information-preserving than
+    discarding it outright. See Greenwood's formula for the 95% CI.
+
+    Trajectories with fewer than *min_length* detections are dropped before
+    fitting (default 2 -- excludes single-frame blips, which would otherwise
+    dominate the curve's initial drop). *max_frame* only limits the plotted
+    x-range; the KM fit itself always uses every remaining trajectory's full
+    duration, since truncating the input would incorrectly shrink the risk
+    set at frames <= max_frame.
+
+    Caveat: censoring is detected from the last frame with ANY detection in
+    a given file, not that movie's true frame count (not available in the
+    csv) -- if a movie's last few frames have zero detections, a handful of
+    censored trajectories could be misclassified as real deaths.
+
+    Saved to ``settings['io']['plot_directory']/survival_curves/<label>_survival.pdf``.
+    """
+    per_traj = pd.concat([compute_trajectory_durations(f) for f in traj_csvs], ignore_index=True)
+
+    n_dropped = int((per_traj["n_detections"] < min_length).sum())
+    per_traj = per_traj[per_traj["n_detections"] >= min_length]
+
+    n_total = len(per_traj)
+    if n_total == 0:
+        print(f"  [KM survival] no trajectories with >= {min_length} detections for {label}; skipping")
+        return
+    n_censored = int(per_traj["censored"].sum())
+    print(
+        f"  [KM survival] {label}: {n_total} trajectories (dropped {n_dropped} "
+        f"with < {min_length} detections), {n_censored} right-censored"
+    )
+
+    km_df = kaplan_meier(per_traj["duration"].to_numpy(), per_traj["censored"].to_numpy())
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.fill_between(km_df["time"], km_df["ci_low"], km_df["ci_high"], step="post", alpha=0.25)
+    ax.step(km_df["time"], km_df["survival"], where="post", color="black")
+
+    ax.set_xlabel("Frames elapsed since first detection")
+    ax.set_ylabel("Survival probability (Kaplan-Meier)")
+    ax.set_title(label)
+    ax.set_ylim(0, 1.05)
+    ax.set_xlim(0, max_frame)
+    ax.text(
+        0.98, 0.95, f"n={n_total}, censored={n_censored}",
+        transform=ax.transAxes, ha="right", va="top", fontsize="small",
+    )
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+    plt.tight_layout()
+
+    output_dirname = os.path.join(settings["io"]["plot_directory"], "survival_curves")
+    os.makedirs(output_dirname, exist_ok=True)
+    output_filename = os.path.join(output_dirname, f"{label}_survival.pdf")
+    fig.savefig(output_filename, dpi=300, format="pdf", bbox_inches="tight")
+    print(f"  Saved {os.path.basename(output_filename)}")
+
+    if showPlot:
+        plt.show()
+    plt.close(fig)
+
+
+def compute_hmm_state_dwell_runs(
+    rollingMLE: pd.DataFrame,
+    state_col: str = "posterior_pop",
+) -> pd.DataFrame:
+    """Break each trajectory's HMM-labeled detections into contiguous dwell runs.
+
+    A run continues while consecutive rows (sorted by frame, within one
+    ``ur_trajectory``) share the same *state_col* value and their frames are
+    exactly 1 apart; it ends on a state change, a frame gap (e.g. a linking
+    blink), or a NaN/unassigned label (the HMM couldn't classify that
+    detection, or the trajectory was too short to be fit at all -- see
+    :func:`fitHMM`'s ``min_obs``). A run ending because the trajectory
+    simply has no further rows is right-censored -- we didn't observe it
+    actually leave that state, unlike a run that ends because the next
+    detection is genuinely labeled with a different state.
+
+    Parameters
+    ----------
+    rollingMLE:
+        Rolling-window MLE DataFrame after :func:`fitHMM`, i.e. with a
+        populated *state_col* (``posterior_pop`` by default).
+    state_col:
+        Column holding the per-detection state label.
+
+    Returns
+    -------
+    DataFrame with columns: ur_trajectory, state, duration, n_detections,
+    censored. One row per dwell run -- a trajectory that revisits a state
+    contributes one row per distinct visit, not one row total.
+    """
+    rows: list[dict] = []
+    for traj_id, group in rollingMLE.groupby("ur_trajectory"):
+        group = group.sort_values("frame")
+        frames = group["frame"].to_numpy()
+        states = group[state_col].to_numpy()
+        n = len(group)
+
+        run_start = 0
+        for i in range(1, n + 1):
+            continues_run = (
+                i < n
+                and not pd.isna(states[i])
+                and not pd.isna(states[run_start])
+                and states[i] == states[run_start]
+                and frames[i] == frames[i - 1] + 1
+            )
+            if continues_run:
+                continue
+
+            if not pd.isna(states[run_start]):
+                rows.append({
+                    "ur_trajectory": traj_id,
+                    "state": int(states[run_start]),
+                    "duration": int(frames[i - 1] - frames[run_start]),
+                    "n_detections": i - run_start,
+                    "censored": i == n,
+                })
+            run_start = i
+
+    return pd.DataFrame(
+        rows, columns=["ur_trajectory", "state", "duration", "n_detections", "censored"]
+    )
+
+
+def plot_survival_by_hmm_state(
+    rollingMLE: pd.DataFrame,
+    settings: dict,
+    condition: str,
+    min_length: int = 2,
+    max_frame: int = 30,
+    showPlot: bool = False,
+) -> None:
+    """Kaplan-Meier survival curve per HMM-assigned diffusive state.
+
+    Unlike :func:`plot_survival_kaplan_meier` (which pools raw, unlabeled
+    trajectory durations straight from ``_traj.csv``), this measures how
+    long a trajectory *dwells* in each of :func:`fitHMM`'s ``posterior_pop``
+    states before transitioning out -- one Kaplan-Meier curve per state, laid
+    out as one subplot per population (state 0 = slowest-diffusing / most
+    confined, per ``settings['plot']['barGraphLabels']`` order). See
+    :func:`compute_hmm_state_dwell_runs` for the run/censoring definition.
+
+    Only meaningful for fastSPT conditions, where *rollingMLE* has already
+    been through :func:`fitHMM`; slowSPT never runs SASPT/HMM at all and
+    keeps the raw-trajectory :func:`plot_survival_kaplan_meier` curve instead.
+
+    Saved to ``settings['io']['plot_directory']/survival_curves/
+    <condition>_survival_by_state.pdf``.
+    """
+    nPopulations = len(settings["plot"]["barGraphLabels"])
+    state_labels = settings["plot"]["barGraphLabels"]
+
+    runs = compute_hmm_state_dwell_runs(rollingMLE)
+    if len(runs):
+        runs = runs[runs["n_detections"] >= min_length]
+
+    fig, axes = plt.subplots(1, nPopulations, figsize=(4 * nPopulations, 5), squeeze=False)
+    axes = axes[0]
+
+    for state in range(nPopulations):
+        ax = axes[state]
+        label = state_labels[state] if state < len(state_labels) else f"state {state}"
+        state_runs = runs[runs["state"] == state] if len(runs) else runs
+
+        if len(state_runs) == 0:
+            ax.text(0.5, 0.5, "no dwell runs", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title(f"{label} (state {state})")
+            ax.set_xlim(0, max_frame)
+            ax.set_ylim(0, 1.05)
+            for spine in ["top", "right"]:
+                ax.spines[spine].set_visible(False)
+            print(
+                f"  [KM survival by state] {condition}: no dwell runs with "
+                f">= {min_length} detections for state {state} ({label})"
+            )
+            continue
+
+        km_df = kaplan_meier(
+            state_runs["duration"].to_numpy(), state_runs["censored"].to_numpy()
+        )
+        n_total = len(state_runs)
+        n_censored = int(state_runs["censored"].sum())
+
+        ax.fill_between(km_df["time"], km_df["ci_low"], km_df["ci_high"], step="post", alpha=0.25)
+        ax.step(km_df["time"], km_df["survival"], where="post", color="black")
+        ax.set_xlabel("Frames elapsed since entering state")
+        if state == 0:
+            ax.set_ylabel("Survival probability (Kaplan-Meier)")
+        ax.set_title(f"{label} (state {state})")
+        ax.set_ylim(0, 1.05)
+        ax.set_xlim(0, max_frame)
+        ax.text(
+            0.98, 0.95, f"n={n_total}, censored={n_censored}",
+            transform=ax.transAxes, ha="right", va="top", fontsize="small",
+        )
+        for spine in ["top", "right"]:
+            ax.spines[spine].set_visible(False)
+
+        print(
+            f"  [KM survival by state] {condition} state {state} ({label}): "
+            f"{n_total} dwell runs, {n_censored} right-censored"
+        )
+
+    fig.suptitle(condition)
+    plt.tight_layout()
+
+    output_dirname = os.path.join(settings["io"]["plot_directory"], "survival_curves")
+    os.makedirs(output_dirname, exist_ok=True)
+    output_filename = os.path.join(output_dirname, f"{condition}_survival_by_state.pdf")
+    fig.savefig(output_filename, dpi=300, format="pdf", bbox_inches="tight")
+    print(f"  Saved {os.path.basename(output_filename)}")
+
+    if showPlot:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_detections_histogram(
+    rolling_MLE: pd.DataFrame,
+    settings: dict,
+    cond: str,
+    y_max: float = 0.25,
+    showPlot: bool = False,
+) -> None:
+    """Plot a density histogram of detections (raw localizations) per trajectory.
+
+    Real SPT datasets are dominated by very short trajectories, so a handful
+    of low bins can be 10-100x taller than the rest of the distribution.
+    The y-axis is plotted as density (fraction of trajectories per bin, not
+    raw count) and capped at a fixed *y_max* rather than scaled per-condition,
+    so histograms from different conditions are visually comparable at a
+    glance. Any bar taller than *y_max* is colored red and its true density
+    listed in a corner box, so the clipping is visible rather than silent.
+
+    Saved to ``settings['io']['plot_directory']/survival_curves/
+    <cond>_detections_histogram.pdf``.
+    """
+    counts = (
+        rolling_MLE.dropna(subset=["ur_trajectory"]).groupby("ur_trajectory").size()
+    )
+    if len(counts) == 0:
+        print(f"  [detections histogram] no trajectories for {cond}; skipping")
+        return
+
+    max_count = int(counts.max())
+    bins = np.arange(1, max_count + 2) - 0.5
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bin_heights, _, patches = ax.hist(
+        counts, bins=bins, density=True, color="#4C72B0", edgecolor="black"
+    )
+
+    for height, patch in zip(bin_heights, patches):
+        if height > y_max:
+            patch.set_color("#B44C4C")
+
+    # Adjacent clipped bins (nearly always the smallest detection counts,
+    # e.g. 1-4) sit right next to each other in x, so per-bar text labels
+    # collide into an unreadable stack. List them in one corner box instead.
+    clipped = [
+        (int(round(patch.get_x() + patch.get_width() / 2)), height)
+        for height, patch in zip(bin_heights, patches)
+        if height > y_max
+    ]
+    if clipped:
+        max_lines = 8
+        lines = [f"{x}: {h:.2f}" for x, h in clipped[:max_lines]]
+        if len(clipped) > max_lines:
+            lines.append(f"... +{len(clipped) - max_lines} more")
+        text = "clipped bins\n(detections: density)\n" + "\n".join(lines)
+        ax.text(
+            0.98, 0.98, text, transform=ax.transAxes, ha="right", va="top",
+            fontsize="x-small",
+            bbox=dict(boxstyle="round", fc="white", ec="gray", alpha=0.85),
+        )
+
+    ax.set_ylim(0, y_max)
+    ax.set_xlabel("Detections per trajectory")
+    ax.set_ylabel("Density")
+    ax.set_title(f"{cond} — detections per trajectory (n={len(counts)})")
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+    plt.tight_layout()
+
+    output_dirname = os.path.join(settings["io"]["plot_directory"], "survival_curves")
+    os.makedirs(output_dirname, exist_ok=True)
+    output_filename = os.path.join(output_dirname, f"{cond}_detections_histogram.pdf")
+    fig.savefig(output_filename, dpi=300, format="pdf", bbox_inches="tight")
+    print(f"  Saved {os.path.basename(output_filename)}")
+
+    if showPlot:
+        plt.show()
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -512,24 +721,6 @@ def _prepare_rolling_mle_for_hmm(
         start_idx += traj_len
 
     return dynamic_MLE_df, filtered_df, X, data, zones, log_zones, nPopulations
-
-
-def compute_naive_pop(
-    rollingMLE: pd.DataFrame, settings: dict, min_obs: int = 7
-) -> pd.DataFrame:
-    """Classify each rolling-window MLE_D observation by simple thresholding.
-
-    Bins ``log10(MLE_D)`` against ``settings['plot']['barGraphBreaks']``,
-    independent of any HMM fit. Intended to be plotted (via
-    :func:`plot_survival_HMM` with ``pop_column="naive_pop"``) *before*
-    :func:`fitHMM`'s state refinement, as a baseline for comparison.
-
-    Returns
-    -------
-    A copy of *rollingMLE* with an added ``naive_pop`` column.
-    """
-    dynamic_MLE_df, *_ = _prepare_rolling_mle_for_hmm(rollingMLE, settings, min_obs=min_obs)
-    return dynamic_MLE_df
 
 
 def fitHMM(
@@ -668,127 +859,6 @@ def fitHMM(
             print(f"State {i}: expected lifetime = {tau:.4f} seconds", file=fh)
 
     return dynamic_MLE_df
-
-
-def plot_survival_HMM(
-    rolling_MLE: pd.DataFrame,
-    settings: dict,
-    cond: str,
-    max_lag: int = 50,
-    showPlot: bool = False,
-    min_run: int = 0,
-    pop_column: str = "posterior_pop",
-) -> None:
-    """Plot empirical state-dwell survival curves for all populations.
-
-    One curve per population is drawn on the same axes, with 95 % Wilson CI
-    shading.  Population labels come from
-    ``settings['plot']['barGraphLabels']`` when available.
-
-    Parameters
-    ----------
-    pop_column:
-        Which per-observation population label to use: ``"naive_pop"``
-        (threshold-only, independent of any HMM fit — see
-        :func:`compute_naive_pop`) or ``"posterior_pop"`` (HMM-refined,
-        from :func:`fitHMM`). Determines both the plot title and output
-        filename.
-
-    Saved to ``settings['io']['plot_directory']/survival_curves/
-    <cond>_<naive|HMM>_survival.pdf``.
-    """
-    fit_label = {"naive_pop": "naive", "posterior_pop": "HMM"}.get(pop_column, pop_column)
-
-    df = rolling_MLE.copy()
-    df = df.dropna(subset=[pop_column])
-    df[pop_column] = df[pop_column].astype(int)
-
-    populations = sorted(df[pop_column].unique())
-    pop_labels = settings["plot"].get("barGraphLabels", None)
-
-    run_lengths_dict: dict[int, list] = {pop: [] for pop in populations}
-    for traj_id, traj in df.groupby("ur_trajectory"):
-        traj = traj.sort_values("frame")
-        pops = traj[pop_column].values
-        for pop in populations:
-            run_lengths_dict[pop].extend(get_runs(pops, pop))
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    colors = plt.cm.tab10(np.linspace(0, 0.9, max(len(populations), 1)))
-    dt = settings["saspt"]["frame_interval"]
-
-    # Compute all survival curves first (no frame cap) so we know the true
-    # data extent before deciding axis units and limits.
-    curves: dict[int, tuple] = {}
-    for pop in populations:
-        sc, ci_lo, ci_hi = run_lengths_to_survival_curve(
-            run_lengths_dict[pop], max_lag=None, min_run=min_run
-        )
-        if len(sc) > 0:
-            curves[pop] = (sc, ci_lo, ci_hi)
-
-    # x-axis limits and units:
-    #   - fast SPT (natural data extent < 100 ms): always show [0, 1000 ms]
-    #   - otherwise: cap at 120 s or full data extent, whichever is shorter;
-    #     use seconds when the displayed range >= 1 s, else milliseconds.
-    t_max_s = max((len(sc) * dt for sc, _, _ in curves.values()), default=0.0)
-    if dt < 0.1:                           # fast SPT (dt < 100 ms) — force 1000 ms window
-        time_scale = 1000.0
-        xlabel     = "Time (ms)"
-        xlim_max   = 1000.0
-    else:
-        xlim_s = min(t_max_s, 120.0)
-        if xlim_s >= 1.0:
-            time_scale = 1.0
-            xlabel     = "Time (s)"
-            xlim_max   = xlim_s
-        else:
-            time_scale = 1000.0
-            xlabel     = "Time (ms)"
-            xlim_max   = xlim_s * 1000.0
-
-    for pop, color in zip(populations, colors):
-        if pop not in curves:
-            continue
-        sc, ci_lo, ci_hi = curves[pop]
-        t = np.arange(len(sc)) * dt * time_scale
-        # Clip to display range
-        mask   = t <= xlim_max
-        t      = t[mask]
-        sc     = sc[mask]
-        ci_lo  = ci_lo[mask]
-        ci_hi  = ci_hi[mask]
-
-        n_runs = len([r for r in run_lengths_dict[pop] if r > min_run])
-        label_name = (
-            pop_labels[pop]
-            if pop_labels is not None and pop < len(pop_labels)
-            else f"Pop {pop}"
-        )
-        label = f"{label_name}  (n={n_runs})"
-
-        ax.fill_between(t, ci_lo, ci_hi, alpha=0.25, color=color)
-        ax.plot(t, sc, color=color, label=label)
-
-    ax.set_ylim(0, 1.05)
-    ax.set_xlim(0, xlim_max)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Survival probability")
-    ax.set_title(f"{cond} — {fit_label} state dwell-time survival")
-    ax.legend(fontsize="small")
-    for spine in ["top", "right"]:
-        ax.spines[spine].set_visible(False)
-    plt.tight_layout()
-
-    output_dirname = os.path.join(settings["io"]["plot_directory"], "survival_curves")
-    os.makedirs(output_dirname, exist_ok=True)
-    output_filename = os.path.join(output_dirname, f"{cond}_{fit_label}_survival.pdf")
-    fig.savefig(output_filename, dpi=300, format="pdf", bbox_inches="tight")
-    print(f"  Saved {os.path.basename(output_filename)}")
-
-    if showPlot:
-        plt.show()
-    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -1400,6 +1470,91 @@ def generate_movies(
 
         except Exception as e:
             print(f"  [movie] skipping {traj_id}: {type(e).__name__}: {e}")
+
+
+def generate_fullfield_overlay_movie(
+    traj_csv: str,
+    nd2_path: str,
+    output_path: str,
+    upscale: int = 1,
+    spot_radius: int = 8,
+    lwd: int = 2,
+    fps: int = 10,
+    color: tuple = (255, 60, 60),
+) -> None:
+    """Render one whole-field-of-view overlay movie straight from a raw
+    ``_traj.csv``: every detection in every frame is circled, and detections
+    linked into the same trajectory across consecutive frames are joined by
+    a line (accumulating over time, like a growing tail).
+
+    Unlike :func:`generate_movies` (which crops to a small window around a
+    handful of *sampled* trajectories and colours by MLE_D), this shows
+    every detection quot called for one file, at native frame scale, with a
+    single fixed colour -- useful as an illustrative "what did tracking
+    actually see" movie for one raw file, independent of any downstream
+    SASPT/rolling-window analysis.
+
+    Parameters
+    ----------
+    traj_csv:
+        Path to the ``_traj.csv`` written by :func:`~core.filewise.run_tracking`
+        (columns ``x``, ``y``, ``frame``, ``trajectory``).
+    nd2_path:
+        Path to the corresponding raw .nd2 movie.
+    output_path:
+        Where to write the ``.mp4``.
+    upscale:
+        Integer upscaling factor (1 = native resolution).
+    spot_radius, lwd:
+        Circle radius and line width, in upscaled pixels.
+    fps:
+        Playback frame rate of the output movie.
+    color:
+        RGB colour used for both circles and connecting lines.
+    """
+    df = pd.read_csv(traj_csv, comment="#").sort_values(["trajectory", "frame"])
+
+    stack = np.array(pims.open(nd2_path))
+    T, H, W = stack.shape
+
+    segments_by_frame: dict[int, list] = {t: [] for t in range(T)}
+    for _, group in df.groupby("trajectory"):
+        group = group.reset_index(drop=True)
+        for i in range(1, len(group)):
+            f_prev, f_curr = int(group.loc[i - 1, "frame"]), int(group.loc[i, "frame"])
+            if f_curr == f_prev + 1:
+                pt1 = (group.loc[i - 1, "x"] * upscale, group.loc[i - 1, "y"] * upscale)
+                pt2 = (group.loc[i, "x"] * upscale, group.loc[i, "y"] * upscale)
+                for t in range(f_curr, T):
+                    segments_by_frame[t].append((pt1, pt2))
+
+    detections_by_frame = {
+        t: g[["x", "y"]].values for t, g in df.groupby("frame")
+    }
+
+    annotated_frames: list[np.ndarray] = []
+    for t in range(T):
+        img_up = Image.fromarray(np.zeros((H * upscale, W * upscale, 3), dtype=np.uint8), "RGB")
+        draw = ImageDraw.Draw(img_up)
+
+        for pt1, pt2 in segments_by_frame[t]:
+            draw.line([pt1, pt2], fill=color, width=lwd)
+
+        for x, y in detections_by_frame.get(t, np.empty((0, 2))):
+            x, y = x * upscale, y * upscale
+            bbox = [x - spot_radius, y - spot_radius, x + spot_radius, y + spot_radius]
+            draw.ellipse(bbox, outline=color, width=lwd)
+
+        annotated_frames.append(np.array(img_up))
+
+    if upscale != 1:
+        stack = np.array([
+            np.array(Image.fromarray(f).resize((W * upscale, H * upscale), resample=Image.BICUBIC))
+            for f in stack
+        ])
+
+    save_overlay_movie(stack, annotated_frames, output_path, fps=fps)
+    print(f"  Saved {output_path}")
 
 
 # ---------------------------------------------------------------------------
