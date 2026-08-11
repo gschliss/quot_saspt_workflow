@@ -42,6 +42,35 @@
 # analysis_directory/settings_override.yaml while its jobs are still in
 # flight, turning a silent parameter-mix into a loud, per-job failure unless
 # --forceall is passed.
+#
+# It's also the reason prepare_run.py's controller passes
+# `--rerun-triggers mtime input code software-env` (deliberately omitting
+# Snakemake's default 'params' trigger). That trigger fingerprints each
+# job's params -- including the whole settings dict via params.settings --
+# with repr(), and re-executes the job the moment that repr differs from
+# what was last recorded (see persistence.py's _params_changed/_serialize_param_builtin,
+# an exact string comparison with no tolerance). Two concrete ways that
+# repr can legitimately-but-spuriously differ without any real settings
+# change:
+#   1. Any change to the *shape* of params.settings itself (e.g. this
+#      refactor renaming rule wildcards / restructuring what's baked into
+#      params) makes every already-computed output look "changed" the
+#      first time the new code runs against it -- confirmed as the direct
+#      cause of a full, unwanted filewise+conditionwise reprocessing on
+#      2026-08-10 against an already-complete analysis directory whose
+#      outputs predated this refactor.
+#   2. repr() of the settings dict embeds saspt.diff_coefs/loc_errors
+#      (np.power/np.linspace float64 arrays), which can round differently
+#      on different node CPUs -- this is the same cross-node divergence
+#      settings_equal()'s docstring documents from 2026-07-17 (sh04-14n21
+#      vs an sh02 node). Spot-checking repr() across several sh02-family
+#      nodes on 2026-08-11 found no divergence there, so this is a latent
+#      risk for sufficiently different node pairs rather than a guaranteed
+#      trigger every time -- but there's no tolerance in Snakemake's own
+#      comparison to protect against it if it does occur.
+# Either way, Snakemake's own 'params' trigger is redundant with the guard
+# below: settings_equal() already re-detects genuine settings drift, with
+# the floating-point tolerance repr()-based comparison lacks.
 import copy
 import os
 import sys

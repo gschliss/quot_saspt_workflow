@@ -59,11 +59,28 @@ source "{software_directory}/saspt_env/bin/activate"
 
 mkdir -p "{analysis_directory}/logs"
 
+# --rerun-triggers omits Snakemake's default 'params' trigger: it fingerprints
+# each job's params (including params.settings, the whole resolved settings
+# dict) via an exact repr() string comparison against what was last
+# recorded, with no tolerance for legitimate-but-cosmetic differences. Two
+# concrete ways that's bitten this pipeline (see the longer note in
+# Snakefile, next to the settings.pkl freeze-and-guard): a rule-body/params
+# shape change alone makes every already-computed output look "changed"
+# the moment new code runs against it (confirmed root cause of a full,
+# unwanted reprocessing on 2026-08-10 against an already-complete analysis
+# directory); repr() also embeds saspt.diff_coefs/loc_errors float64
+# arrays, which can in principle round differently across sufficiently
+# different node CPUs, the same category of cross-node divergence
+# settings_equal()'s docstring documents from 2026-07-17. Either way,
+# Snakemake's own 'params' trigger is redundant here: the Snakefile's
+# settings.pkl freeze-and-guard already re-detects genuine settings drift,
+# with the floating-point tolerance repr()-based comparison lacks.
 snakemake --snakefile "{snakefile}" --directory "{analysis_directory}" \\
     --jobs 40 \\
     --latency-wait 60 \\
     --cluster "sbatch -p normal --time=01:00:00 --mem=16G --cpus-per-task=2 -o {analysis_directory}/logs/snakejob_%j.log" \\
     --keep-going \\
+    --rerun-triggers mtime input code software-env \\
     --config data_directory="{data_directory}" analysis_directory="{analysis_directory}" \\
     "$@"
 """
