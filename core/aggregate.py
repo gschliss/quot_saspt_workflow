@@ -194,10 +194,12 @@ def run_aggregate_survival_by_exposure(
 def run_aggregate_survival_by_interval(
     settings: dict, min_length: int = 2, max_frame: int = 30
 ) -> None:
-    """Kaplan-Meier trajectory survival curves for every distinct ``int=``
-    (imaging interval) tag, pooling every condition that shares it, overlaid
-    on one common set of axes so the effect of imaging interval on
-    trajectory survival can be compared directly.
+    """One Kaplan-Meier survival plot per distinct ``int=`` (imaging
+    interval) tag, with every condition sharing that interval broken out as
+    its own overlaid trace on one common set of axes -- lets
+    condition-to-condition differences be compared directly within a fixed
+    imaging interval (as opposed to :func:`run_aggregate_survival_by_exposure`,
+    which pools everything sharing an ``exp=`` tag into a single curve).
 
     Skipped entirely if no condition's filename carries an ``int=`` tag --
     not every dataset encodes one.
@@ -214,7 +216,8 @@ def run_aggregate_survival_by_interval(
         print("run_aggregate_survival_by_interval: no conditions found — skipping.")
         return
 
-    by_interval: dict[str, list[str]] = {}
+    # conditions_by_interval[interval][condition] = [traj_csv, ...]
+    conditions_by_interval: dict[str, dict[str, list[str]]] = {}
     for condition, nd2_files in grouped_nd2.items():
         interval = extract_metadata(condition, ["int"]).get("int")
         if interval is None:
@@ -223,17 +226,19 @@ def run_aggregate_survival_by_interval(
             os.path.join(settings["io"]["traj_directory"], os.path.splitext(f)[0] + "_traj.csv")
             for f in nd2_files
         ]
-        by_interval.setdefault(interval, []).extend(f for f in traj_csvs if os.path.exists(f))
+        traj_csvs = [f for f in traj_csvs if os.path.exists(f)]
+        if traj_csvs:
+            conditions_by_interval.setdefault(interval, {})[condition] = traj_csvs
 
-    if not by_interval:
+    if not conditions_by_interval:
         print("run_aggregate_survival_by_interval: no 'int=' tag found on any condition — skipping.")
         return
 
-    print(f"run_aggregate_survival_by_interval: interval groups found — {sorted(by_interval)}")
-    plot_survival_kaplan_meier_overlay(
-        {f"int={interval}": csvs for interval, csvs in by_interval.items()},
-        settings, "by_interval",
-        min_length=min_length, max_frame=max_frame,
-    )
+    print(f"run_aggregate_survival_by_interval: interval groups found — {sorted(conditions_by_interval)}")
+    for interval, condition_traj_csvs in sorted(conditions_by_interval.items()):
+        plot_survival_kaplan_meier_overlay(
+            condition_traj_csvs, settings, f"int={interval}",
+            min_length=min_length, max_frame=max_frame,
+        )
 
     print("\nrun_aggregate_survival_by_interval complete.")

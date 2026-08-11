@@ -430,8 +430,9 @@ def plot_survival_kaplan_meier_overlay(
     max_frame: int = 30,
 ) -> None:
     """Kaplan-Meier survival curves for several groups overlaid on one shared
-    set of axes -- one step-curve per group, e.g. comparing imaging
-    intervals directly rather than each getting its own separate plot.
+    set of axes -- one step-curve per group, e.g. one trace per condition
+    within a fixed imaging interval, rather than each getting its own
+    separate plot.
 
     Same fitting/censoring logic as :func:`plot_survival_kaplan_meier`
     (see its docstring), just without the per-group confidence-interval
@@ -441,8 +442,9 @@ def plot_survival_kaplan_meier_overlay(
     Parameters
     ----------
     grouped_traj_csvs:
-        Maps a group's display label (e.g. ``"int=2p500"``) to the list of
-        ``_traj.csv`` paths pooled for that group.
+        Maps a group's display label (e.g. a condition string) to the list
+        of ``_traj.csv`` paths for that group -- not pooled with any other
+        group's.
     plot_label:
         Used for the plot title and output filename.
 
