@@ -147,11 +147,16 @@ ALL_TRAJ_CSVS = [
 # All per-condition PKLs (conditionwise outputs)
 ALL_COND_PKLS = [_condition_pkl(c) for c in _CONDITIONS]
 
-# Final aggregate outputs
-AGGREGATE_OUTPUTS = [
-    os.path.join(_SETTINGS["io"]["plot_directory"], "aggregate_posterior.pdf"),
-    os.path.join(_SETTINGS["io"]["plot_directory"], "aggregate_MLE_bar.pdf"),
-]
+# aggregate_posterior.pdf/aggregate_MLE_bar.pdf are only meaningful when at
+# least one condition has fastSPT/SASPT data -- run_aggregate() legitimately
+# skips writing them for an all-slowSPT analysis directory (no diffusion
+# coefficients to compare). Whether they exist is a real, data-dependent
+# outcome of the analysis, not a contract rule aggregate can promise to
+# fulfill -- so it's tracked with a completion marker instead of demanding
+# those two paths directly, which used to make Snakemake report a hard
+# failure (MissingOutputException) for a rule that had in fact already done
+# everything it was supposed to (survival curves + publish_run_report).
+AGGREGATE_DONE_MARKER = os.path.join(_SETTINGS["io"]["plot_directory"], ".aggregate_complete")
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +164,7 @@ AGGREGATE_OUTPUTS = [
 # ---------------------------------------------------------------------------
 rule all:
     input:
-        AGGREGATE_OUTPUTS
+        AGGREGATE_DONE_MARKER
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +222,7 @@ rule aggregate:
     input:
         pkls = ALL_COND_PKLS
     output:
-        AGGREGATE_OUTPUTS
+        touch(AGGREGATE_DONE_MARKER)
     params:
         settings = copy.deepcopy(_SETTINGS)
     run:
