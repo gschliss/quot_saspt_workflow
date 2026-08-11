@@ -312,8 +312,11 @@ def compute_life_table_survival(
     probability is ``(n_at_risk - n_events) / n_at_risk`` among trajectories
     still at risk (``length >= t``), with the running product expressed as
     a percentage (0-100) rather than a 0-1 probability -- cumulatively
-    equivalent to standard Kaplan-Meier (no confidence interval), just
-    evaluated at every frame instead of only at observed event times.
+    equivalent to standard Kaplan-Meier, just evaluated at every frame
+    instead of only at observed event times. A 95% CI is layered on top via
+    Greenwood's formula (same as this module's older continuous-event-time
+    ``kaplan_meier()``), accumulated only at steps with a real event so it
+    matches the same CI a continuous-time KM fit on this data would give.
 
     Trajectories shorter than *min_length* frames are dropped first (R:
     ``filter(traj_length > 1)``, i.e. the default ``min_length=2``).
@@ -324,8 +327,9 @@ def compute_life_table_survival(
 
     Returns
     -------
-    DataFrame with columns time, n_at_risk, n_events, survival_pct, for
-    time in 0..max_frame -- or None if no trajectory meets *min_length*.
+    DataFrame with columns time, n_at_risk, n_events, survival_pct,
+    ci_low_pct, ci_high_pct, for time in 0..max_frame -- or None if no
+    trajectory meets *min_length*.
     """
     per_traj = pd.concat([compute_trajectory_durations(f) for f in traj_csvs], ignore_index=True)
     per_traj["traj_length"] = per_traj["last_frame"] - per_traj["first_frame"] + 1
@@ -338,15 +342,21 @@ def compute_life_table_survival(
 
     rows = []
     cumulative = 1.0
+    greenwood_sum = 0.0  # running sum of d / (n_at_risk * (n_at_risk - d))
     for t in range(0, max_frame + 1):
         at_risk = lengths >= t
         n_at_risk = int(at_risk.sum())
         n_events = int(np.sum(is_event & (lengths == t))) if n_at_risk else 0
         if n_at_risk > 0:
             cumulative *= (n_at_risk - n_events) / n_at_risk
+            if n_at_risk > n_events:
+                greenwood_sum += n_events / (n_at_risk * (n_at_risk - n_events))
+        se = cumulative * np.sqrt(greenwood_sum)
         rows.append({
             "time": t, "n_at_risk": n_at_risk, "n_events": n_events,
             "survival_pct": cumulative * 100,
+            "ci_low_pct": max(0.0, cumulative - 1.96 * se) * 100,
+            "ci_high_pct": min(1.0, cumulative + 1.96 * se) * 100,
         })
 
     return pd.DataFrame(rows)
@@ -428,9 +438,9 @@ def plot_survival_kaplan_meier(
     :func:`_write_trajectory_count_table` for the sidecar this writes so
     publish_run_report can show a trajectory-count table above the plot.
 
-    Style matches that reference script's ggplot ``theme_classic`` look:
-    a plain line (not a step function), percent (0-100) y-axis, no
-    confidence band, no in-plot n= text.
+    Style matches that reference script's ggplot ``theme_classic`` look
+    (a plain line, not a step function, percent (0-100) y-axis, no in-plot
+    n= text), plus a 95% Greenwood's-formula confidence band.
 
     Saved to ``settings['io']['plot_directory']/survival_curves/<label>_survival.pdf``.
     """
@@ -443,6 +453,10 @@ def plot_survival_kaplan_meier(
     print(f"  [survival] {label}: {n_total} trajectories")
 
     fig, ax = plt.subplots(figsize=(8, 5))
+    ax.fill_between(
+        life_table["time"], life_table["ci_low_pct"], life_table["ci_high_pct"],
+        color="black", alpha=0.2, linewidth=0,
+    )
     ax.plot(life_table["time"], life_table["survival_pct"], color="black", linewidth=1)
 
     ax.set_xlabel("Frames elapsed since first detection")
@@ -483,10 +497,11 @@ def plot_survival_kaplan_meier_overlay(
 
     Style matches a validated reference R script's ggplot ``theme_classic``
     look: plain lines (not step functions), percent (0-100) y-axis, no
-    confidence bands (would overlap illegibly with more than one group on
-    the same axes), no in-plot n= text, and no counts in the legend either
-    (that script's legend was label-only) -- counts go in the sidecar
-    table instead.
+    in-plot n= text, and no counts in the legend either (that script's
+    legend was label-only) -- counts go in the sidecar table instead. Each
+    group's 95% Greenwood's-formula confidence band is shaded in that
+    group's own line color at low alpha, since overlapping bands are still
+    informative but would be illegible at full opacity.
 
     Parameters
     ----------
@@ -513,7 +528,11 @@ def plot_survival_kaplan_meier_overlay(
         n_total = int(life_table["n_at_risk"].iloc[0])
         print(f"  [survival overlay] {group_label}: {n_total} trajectories")
 
-        ax.plot(life_table["time"], life_table["survival_pct"], linewidth=1, label=group_label)
+        line, = ax.plot(life_table["time"], life_table["survival_pct"], linewidth=1, label=group_label)
+        ax.fill_between(
+            life_table["time"], life_table["ci_low_pct"], life_table["ci_high_pct"],
+            color=line.get_color(), alpha=0.15, linewidth=0,
+        )
         count_rows.append((group_label, n_total))
 
     if not count_rows:
