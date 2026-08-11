@@ -417,6 +417,10 @@ def plot_survival_kaplan_meier(
     fig.savefig(output_filename, dpi=300, format="pdf", bbox_inches="tight")
     print(f"  Saved {os.path.basename(output_filename)}")
 
+    if showPlot:
+        plt.show()
+    plt.close(fig)
+
 
 def plot_survival_kaplan_meier_overlay(
     grouped_traj_csvs: dict[str, list[str]],
@@ -489,10 +493,6 @@ def plot_survival_kaplan_meier_overlay(
     fig.savefig(output_filename, dpi=300, format="pdf", bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved {os.path.basename(output_filename)}")
-
-    if showPlot:
-        plt.show()
-    plt.close(fig)
 
 
 def compute_hmm_state_dwell_runs(
