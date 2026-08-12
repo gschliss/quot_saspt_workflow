@@ -19,7 +19,6 @@ here).
 
 from __future__ import annotations
 
-import base64
 import csv
 import datetime
 import getpass
@@ -201,13 +200,6 @@ def publish_run_report(settings: dict) -> str | None:
             pdf_abs_dir = os.path.join(report_abs_dir, "pdfs")
             os.makedirs(pdf_abs_dir, exist_ok=True)
 
-            # PNG rasters are embedded inline (base64 data URI) rather than
-            # committed as files -- only the PDFs under pdfs/ are persisted
-            # -- so they're rendered into a scratch dir outside clone_dir,
-            # never touched by `git add`.
-            raster_dir = os.path.join(tmp, "raster")
-            os.makedirs(raster_dir, exist_ok=True)
-
             lines = [
                 f"# SPT run report — {date_dir_name} / {analysis_tag}",
                 "",
@@ -261,7 +253,7 @@ def publish_run_report(settings: dict) -> str | None:
                         dest_pdf = os.path.join(pdf_abs_dir, flat_name)
                         shutil.copy2(pdf_path, dest_pdf)
 
-                        png_prefix = os.path.join(raster_dir, os.path.splitext(flat_name)[0])
+                        png_prefix = os.path.join(report_abs_dir, os.path.splitext(flat_name)[0])
                         png_path = _rasterize_pdf_to_png(pdf_path, png_prefix)
 
                         heading = "#####" if subgroup is not None else "####"
@@ -277,9 +269,12 @@ def publish_run_report(settings: dict) -> str | None:
                             lines.append("")
 
                         if png_path:
-                            with open(png_path, "rb") as fh:
-                                png_b64 = base64.b64encode(fh.read()).decode("ascii")
-                            lines.append(f"![{rel}](data:image/png;base64,{png_b64})")
+                            # report_abs_dir (and everything under it, incl.
+                            # pdfs/) is a subdirectory next to the .md file,
+                            # not the .md file's own directory -- links must
+                            # be prefixed with report_stem/, a bare
+                            # basename/"pdfs/..." 404s.
+                            lines.append(f"![{rel}]({report_stem}/{os.path.basename(png_path)})")
                         else:
                             lines.append("_(PNG preview unavailable — pdftoppm not on PATH for this job)_")
                         lines.append("")
