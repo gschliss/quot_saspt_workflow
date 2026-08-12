@@ -2,12 +2,12 @@
 core/publish.py
 
 Publish a per-run markdown report (resolved settings + every plot the run
-produced) to the ``sptLanding`` GitHub Pages repo, as the final step after
-aggregate plots are generated.
+produced) to the org-owned ``Schlissel-lab/sptLanding`` GitHub Pages repo,
+as the final step after aggregate plots are generated.
 
-Uses the ``github-results`` SSH host alias (~/.ssh/config), which points at
-a deploy key scoped to gschliss/sptLanding only -- this module never touches
-any other repository's credentials.
+Uses the ``github-schlissel-lab-sptlanding`` SSH host alias (~/.ssh/config),
+which points at a deploy key scoped to that repo only -- this module never
+touches any other repository's credentials.
 
 Each call clones the repo fresh into its own temp directory and pushes with
 a fetch/rebase retry loop, so concurrent sweep members finishing at
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import csv
 import datetime
+import getpass
 import glob
 import io
 import os
@@ -31,13 +32,18 @@ import tempfile
 from core.settings import print_nested_dict
 from core.utils import extract_metadata
 
-_REPO_SSH_ALIAS = "github-results"
-_REPO_URL = f"git@{_REPO_SSH_ALIAS}:gschliss/sptLanding.git"
+_REPO_SSH_ALIAS = "github-schlissel-lab-sptlanding"
+_REPO_URL = f"git@{_REPO_SSH_ALIAS}:Schlissel-lab/sptLanding.git"
 _REPO_BRANCH = "main"
-# Reports live under data/, not docs/ -- docs/ is the GitHub Pages site
-# root (index.html etc.) and should stay untouched by run reports.
-_REPORTS_SUBDIR = "data"
 _MAX_PUSH_RETRIES = 5
+
+
+def _current_username() -> str:
+    """Sherlock login username -- reports are namespaced by whoever ran the
+    pipeline (e.g. gschliss/2026_08_07/...), not a fixed subdirectory, since
+    sptLanding is now a shared org repo other lab members may also push to.
+    """
+    return os.environ.get("USER") or getpass.getuser()
 
 # pdftoppm (poppler/0.47.0) is deliberately NOT loaded via `ml system poppler`
 # into the caller's shell: that module reloads libjpeg-turbo 2.1.4 -> 1.5.1
@@ -172,7 +178,7 @@ def publish_run_report(settings: dict) -> str | None:
     analysis_tag = os.path.basename(settings["io"]["analysis_directory"].rstrip("/"))
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     report_stem = f"{timestamp}_{analysis_tag}"
-    report_rel_dir = os.path.join(_REPORTS_SUBDIR, date_dir_name, report_stem)
+    report_rel_dir = os.path.join(_current_username(), date_dir_name, report_stem)
 
     try:
         with tempfile.TemporaryDirectory(dir=os.environ.get("SCRATCH")) as tmp:
