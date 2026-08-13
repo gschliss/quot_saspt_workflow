@@ -3,7 +3,7 @@
 # on Sherlock, without needing an interactive Claude Code session.
 #
 # Usage:
-#   run-spt-analysis --threshold=T --linking=R --gaps=G \
+#   run-spt-analysis [--threshold=T] [--linking=R] [--gaps=G] \
 #       [--set key.path=value]... [--write-only] <date_directory>
 #
 # <date_directory> is the dated folder containing raw_data/ (e.g.
@@ -11,12 +11,13 @@
 #
 # --threshold / --linking / --gaps map to quot.detect.t /
 # quot.track.search_radius / quot.track.max_blinks -- the three knobs every
-# sweep on this dataset has actually varied. Everything else defaults to
-# this project's established calibration (w=11,
-# localize.window_size=7/max_iter=10/damp=1, track.method=conservative,
-# min_I0=200.0, plot.bleach_xlim=[-125000,25000]); pass --set key=value
-# (repeatable) to override any of those, or set anything not covered by
-# the three named flags.
+# sweep on this dataset has actually varied. Each defaults to this
+# project's usual starting point (threshold=12, linking=1.1, gaps=0) if
+# omitted. Everything else defaults to this project's established
+# calibration (w=11, localize.window_size=7/max_iter=10/damp=1,
+# track.method=conservative, min_I0=200.0, plot.bleach_xlim=[-125000,25000]);
+# pass --set key=value (repeatable) to override any of those, or set
+# anything not covered by the three named flags.
 #
 # --write-only prepares the analysis directory + controller script without
 # submitting it -- e.g. to check settings_override.yaml first.
@@ -38,21 +39,26 @@ set -euo pipefail
 SW_DIR="/oak/stanford/groups/gschliss/Gavin/software"
 REPO_DIR="$SW_DIR/quot_saspt_workflow"
 
-THRESHOLD=""
-LINKING=""
-GAPS=""
+# Defaults applied unless overridden on the command line.
+DEFAULT_THRESHOLD="12"
+DEFAULT_LINKING="1.1"
+DEFAULT_GAPS="0"
+
+THRESHOLD="$DEFAULT_THRESHOLD"
+LINKING="$DEFAULT_LINKING"
+GAPS="$DEFAULT_GAPS"
 EXTRA_SETS=()
 WRITE_ONLY=0
 FORCE=0
 DATE_DIR=""
 
 usage() {
-    cat >&2 <<'USAGE'
-Usage: run-spt-analysis --threshold=T --linking=R --gaps=G [--set key.path=value]... [--write-only] [--force] <date_directory>
+    cat >&2 <<USAGE
+Usage: run-spt-analysis [--threshold=T] [--linking=R] [--gaps=G] [--set key.path=value]... [--write-only] [--force] <date_directory>
 
-  --threshold=T   quot.detect.t (quality threshold)
-  --linking=R     quot.track.search_radius (linking distance, um)
-  --gaps=G        quot.track.max_blinks (gap-closing tolerance, frames)
+  --threshold=T   quot.detect.t (quality threshold), default $DEFAULT_THRESHOLD
+  --linking=R     quot.track.search_radius (linking distance, um), default $DEFAULT_LINKING
+  --gaps=G        quot.track.max_blinks (gap-closing tolerance, frames), default $DEFAULT_GAPS
   --set K=V       extra dotted settings override, repeatable
   --write-only    prepare the analysis directory + controller script, don't submit it
   --force         overwrite an existing, differing settings_override.yaml instead of refusing
@@ -75,10 +81,6 @@ for arg in "$@"; do
 done
 
 [[ -z "$DATE_DIR" ]] && usage
-if [[ -z "$THRESHOLD" || -z "$LINKING" || -z "$GAPS" ]]; then
-    echo "--threshold, --linking, and --gaps are all required" >&2
-    usage
-fi
 
 if [[ ! -d "$DATE_DIR" ]]; then
     echo "No such directory: $DATE_DIR" >&2
