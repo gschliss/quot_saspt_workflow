@@ -103,11 +103,20 @@ def main() -> None:
         default=False,
         help="Also write <analysis_directory>/run_snakemake_controller.slurm, ready to sbatch.",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help=(
+            "Overwrite an existing analysis directory's settings_override.yaml even if its "
+            "content differs from what --set requested (default: refuse and print the diff)."
+        ),
+    )
     args = parser.parse_args()
 
     data_directory = os.path.abspath(args.data_directory)
     overrides = build_override_from_args(args.overrides)
-    settings = resolve_and_freeze_override(data_directory, overrides)
+    settings = resolve_and_freeze_override(data_directory, overrides, force=args.force)
     analysis_directory = settings["io"]["analysis_directory"]
 
     if args.write_controller:

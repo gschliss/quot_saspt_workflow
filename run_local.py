@@ -82,7 +82,11 @@ def _parse_args() -> argparse.Namespace:
         "--force",
         action="store_true",
         default=False,
-        help="Force re-processing of all files, ignoring existing outputs.",
+        help=(
+            "Force re-processing of all files, ignoring existing outputs. Also allows "
+            "overwriting an existing analysis directory's settings_override.yaml if it "
+            "differs from what --set requested (default: refuse and print the diff)."
+        ),
     )
     parser.add_argument(
         "--mode",
@@ -111,7 +115,7 @@ def main() -> None:
     # Load and persist settings
     # ------------------------------------------------------------------
     overrides = build_override_from_args(args.overrides)
-    settings = resolve_and_freeze_override(data_directory, overrides)
+    settings = resolve_and_freeze_override(data_directory, overrides, force=args.force)
     _apply_gpu_settings(settings)
     print(f"  {_report_gpu_status()}\n")
 

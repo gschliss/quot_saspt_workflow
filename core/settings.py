@@ -506,7 +506,7 @@ def build_override_from_args(set_args: list[str]) -> dict:
     return override
 
 
-def resolve_and_freeze_override(data_directory: str, overrides: dict) -> dict:
+def resolve_and_freeze_override(data_directory: str, overrides: dict, force: bool = False) -> dict:
     """Resolve settings from *overrides* + code defaults, create this run's
     analysis directory, and persist *overrides* there as
     ``<analysis_directory>/settings_override.yaml`` -- the durable, per-run
@@ -518,12 +518,25 @@ def resolve_and_freeze_override(data_directory: str, overrides: dict) -> dict:
     later code-default change is still picked up on --forceall re-resolution
     instead of being frozen in by accident.
 
+    If *analysis_directory* already has a settings_override.yaml whose
+    content differs from *overrides*, this raises instead of silently
+    overwriting it -- caught in practice while testing a CLI wrapper
+    (2026-08-12): an existing, fully-computed fastSPT directory's override
+    file got silently clobbered by an unrelated test run, which would have
+    corrupted that directory's provenance record (its actual tracked
+    outputs were unaffected, since nothing was re-executed, but a later
+    reader of settings_override.yaml would have been misled about what
+    produced them). Pass *force=True* once you're sure every output already
+    in that directory should be recomputed with the new settings.
+
     Parameters
     ----------
     data_directory:
         Absolute path to the folder that contains .nd2 files.
     overrides:
         Nested override dict, e.g. from :func:`build_override_from_args`.
+    force:
+        Overwrite an existing, differing settings_override.yaml anyway.
 
     Returns
     -------
@@ -536,6 +549,19 @@ def resolve_and_freeze_override(data_directory: str, overrides: dict) -> dict:
     settings["io"]["_min_I0_baseline"] = settings["quot"]["track"]["min_I0"]
 
     override_path = os.path.join(settings["io"]["analysis_directory"], "settings_override.yaml")
+    if os.path.exists(override_path) and not force:
+        with open(override_path) as fh:
+            existing_overrides = yaml.load(fh, Loader=yaml.FullLoader) or {}
+        if existing_overrides != overrides:
+            raise RuntimeError(
+                f"{override_path} already exists with different overrides than requested "
+                "-- refusing to overwrite.\n"
+                f"Existing: {existing_overrides}\n"
+                f"Requested: {overrides}\n"
+                "Pass force=True (prepare_run.py --force) once you're sure every output "
+                "already in that directory should be recomputed with the new settings."
+            )
+
     with open(override_path, "w") as fh:
         yaml.dump(overrides, fh, default_flow_style=False, sort_keys=False)
     print(f"Wrote settings overrides to {override_path}", file=sys.stderr)
