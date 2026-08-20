@@ -27,7 +27,7 @@ import pickle
 import pandas as pd
 
 import core  # noqa: F401
-from core.utils import aggregate_csv
+from core.utils import aggregate_csv, condition_matches_background, resolve_background_traj_csvs
 from core import plots
 
 
@@ -71,19 +71,19 @@ def _run_conditionwise_slowSPT(condition: str, settings: dict) -> None:
     plots.plot_survival_kaplan_meier(traj_csvs, settings, condition, showPlot=False)
 
     background_condition = settings["survival"]["background_condition"]
-    if background_condition is not None and condition != background_condition:
-        background_traj_csvs = sorted(
-            glob.glob(os.path.join(settings["io"]["traj_directory"], f"{background_condition}*_traj.csv"))
+    if background_condition is not None and not condition_matches_background(condition, background_condition):
+        matched_background_condition, background_traj_csvs = resolve_background_traj_csvs(
+            settings, condition, background_condition
         )
         if background_traj_csvs:
             plots.plot_survival_background_corrected(
-                traj_csvs, background_traj_csvs, settings, condition, background_condition,
+                traj_csvs, background_traj_csvs, settings, condition, matched_background_condition,
                 showPlot=False,
             )
         else:
             print(
-                f"  [survival corrected] background condition {background_condition!r} has "
-                f"no _traj.csv files; skipping correction for {condition}"
+                f"  [survival corrected] no condition matching background {background_condition!r} "
+                f"(with a matching imaging interval) found; skipping correction for {condition}"
             )
 
     plotting_pkl_dir = os.path.join(settings["io"]["plot_directory"], "plotting_pkls")

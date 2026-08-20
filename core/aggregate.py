@@ -27,7 +27,7 @@ from core.plots import (
     plot_survival_kaplan_meier_overlay,
     plot_survival_kaplan_meier_overlay_corrected,
 )
-from core.utils import extract_metadata, group_files_by_metadata
+from core.utils import condition_matches_background, extract_metadata, group_files_by_metadata
 
 
 def run_aggregate(settings: dict) -> None:
@@ -237,31 +237,36 @@ def run_aggregate_survival_by_interval(
 
     print(f"run_aggregate_survival_by_interval: interval groups found — {sorted(conditions_by_interval)}")
 
-    # If configured, resolve the background condition's own trajectories once
-    # up front -- same background estimate is reused for every interval group,
-    # since it's the background condition's raw contamination rate, not
-    # anything specific to a given interval.
+    # Background correction, if configured, must be resolved separately per
+    # interval group: pGS322 imaged at int=2.5s and pGS322 imaged at int=7.5s
+    # are two different conditions/traj_csv sets, and the wrong one's
+    # survival shape isn't comparable frame-index-for-frame-index to a
+    # curve computed under a different frame interval.
     background_condition = settings["survival"]["background_condition"]
-    background_traj_csvs = None
-    if background_condition is not None:
-        background_traj_csvs = sorted(
-            glob.glob(os.path.join(settings["io"]["traj_directory"], f"{background_condition}*_traj.csv"))
-        )
-        if not background_traj_csvs:
-            print(
-                f"run_aggregate_survival_by_interval: background condition "
-                f"{background_condition!r} has no _traj.csv files -- skipping corrected overlays."
-            )
-            background_traj_csvs = None
 
     for interval, condition_traj_csvs in sorted(conditions_by_interval.items()):
         plot_survival_kaplan_meier_overlay(
             condition_traj_csvs, settings, f"int={interval}",
             min_length=min_length, max_frame=max_frame,
         )
-        if background_traj_csvs:
+
+        if background_condition is not None:
+            bg_keys = [
+                c for c in condition_traj_csvs if condition_matches_background(c, background_condition)
+            ]
+            if not bg_keys:
+                print(
+                    f"  [survival overlay corrected] no condition matching background "
+                    f"{background_condition!r} found for int={interval}; skipping"
+                )
+                continue
+            if len(bg_keys) > 1:
+                print(
+                    f"  [survival overlay corrected] multiple conditions match background "
+                    f"{background_condition!r} for int={interval}: {bg_keys} -- using {bg_keys[0]!r}"
+                )
             plot_survival_kaplan_meier_overlay_corrected(
-                condition_traj_csvs, background_traj_csvs, background_condition, settings,
+                condition_traj_csvs, condition_traj_csvs[bg_keys[0]], bg_keys[0], settings,
                 f"int={interval}", min_length=min_length, max_frame=max_frame,
             )
 
