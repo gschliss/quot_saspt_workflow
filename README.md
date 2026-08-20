@@ -55,6 +55,8 @@ python run_local.py --input_directory /path/to/nd2_files/ \
 
 `--set` is repeatable and takes any dotted path into the settings tree (`core/settings.py`), e.g. `--set quot.detect.t=10.0 --set "plot.ylim=[0,5]"`. `--mode {track,condition,aggregate,all}` runs a single stage; `--force` re-runs even if outputs already exist.
 
+To also emit background-corrected survival curves (a separate `*_survival_corrected.pdf`/`*_survival_overlay_corrected.pdf` output alongside the normal ones, subtracting the implied background population estimated from a control condition), set `--set survival.background_condition=<condition>`. The named condition must contain `000` or `322` (this project's background/control naming convention) or settings resolution raises an error.
+
 HPC / SLURM, for threshold or linking-distance sweeps:
 
 ```bash

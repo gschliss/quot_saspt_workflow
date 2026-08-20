@@ -25,6 +25,7 @@ from core.plots import (
     _render_population_bar,
     plot_survival_kaplan_meier,
     plot_survival_kaplan_meier_overlay,
+    plot_survival_kaplan_meier_overlay_corrected,
 )
 from core.utils import extract_metadata, group_files_by_metadata
 
@@ -235,10 +236,33 @@ def run_aggregate_survival_by_interval(
         return
 
     print(f"run_aggregate_survival_by_interval: interval groups found — {sorted(conditions_by_interval)}")
+
+    # If configured, resolve the background condition's own trajectories once
+    # up front -- same background estimate is reused for every interval group,
+    # since it's the background condition's raw contamination rate, not
+    # anything specific to a given interval.
+    background_condition = settings["survival"]["background_condition"]
+    background_traj_csvs = None
+    if background_condition is not None:
+        background_traj_csvs = sorted(
+            glob.glob(os.path.join(settings["io"]["traj_directory"], f"{background_condition}*_traj.csv"))
+        )
+        if not background_traj_csvs:
+            print(
+                f"run_aggregate_survival_by_interval: background condition "
+                f"{background_condition!r} has no _traj.csv files -- skipping corrected overlays."
+            )
+            background_traj_csvs = None
+
     for interval, condition_traj_csvs in sorted(conditions_by_interval.items()):
         plot_survival_kaplan_meier_overlay(
             condition_traj_csvs, settings, f"int={interval}",
             min_length=min_length, max_frame=max_frame,
         )
+        if background_traj_csvs:
+            plot_survival_kaplan_meier_overlay_corrected(
+                condition_traj_csvs, background_traj_csvs, background_condition, settings,
+                f"int={interval}", min_length=min_length, max_frame=max_frame,
+            )
 
     print("\nrun_aggregate_survival_by_interval complete.")
