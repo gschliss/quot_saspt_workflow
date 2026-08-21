@@ -118,7 +118,6 @@ def get_default_settings() -> dict:
     settings["quot"] = {}
     settings["saspt"] = {}
     settings["plot"] = {}
-    settings["survival"] = {}
 
     # -- I/O ------------------------------------------------------------------
     # slowSPT vs fastSPT is auto-detected from each file/condition's own
@@ -198,13 +197,6 @@ def get_default_settings() -> dict:
     settings["plot"]["mult_on_sd"] = 5.0
     settings["plot"]["barGraphBreaks"] = [-10000, 10000]
     settings["plot"]["barGraphLabels"] = ["None"]
-
-    # -- survival ---------------------------------------------------------
-    # Name of a condition to treat as a background/no-signal control (e.g. an
-    # untagged or non-recruiting construct) -- see plot_survival_background_
-    # corrected in core/plots.py. None (default) disables background
-    # correction entirely; existing survival plots are unaffected either way.
-    settings["survival"]["background_condition"] = None
 
     return settings
 
@@ -289,30 +281,6 @@ def update_default_settings_for_analysis(
     os.makedirs(settings["io"]["plot_directory"], exist_ok=True)
 
     return settings
-
-
-def validate_background_condition(settings: dict) -> None:
-    """Guard against survival background-correction silently pointing at the
-    wrong condition: ``settings['survival']['background_condition']``, if
-    set, must contain ``'000'`` or ``'322'`` -- this project's naming
-    convention for background/no-signal controls. Raises ``ValueError``
-    otherwise. A ``None`` background_condition (the default, correction
-    disabled) always passes.
-
-    Called from :func:`load_settings` and :func:`resolve_and_freeze_override`
-    so a typo'd condition name fails fast at settings-resolution time
-    instead of silently producing a bogus corrected survival curve deep in
-    a per-condition job.
-    """
-    background_condition = settings["survival"]["background_condition"]
-    if background_condition is None:
-        return
-    if "000" not in background_condition and "322" not in background_condition:
-        raise ValueError(
-            f"survival.background_condition={background_condition!r} must contain "
-            "'000' or '322' (background/control naming convention) -- refusing to "
-            "use it as a background sample."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -507,8 +475,6 @@ def load_settings(
     # settings["quot"] / settings["quot"]["track"] straight through as **kwargs.
     settings["io"]["_min_I0_baseline"] = settings["quot"]["track"]["min_I0"]
 
-    validate_background_condition(settings)
-
     return settings
 
 
@@ -581,7 +547,6 @@ def resolve_and_freeze_override(data_directory: str, overrides: dict, force: boo
     deep_update(settings, overrides)
     update_default_settings_for_analysis(settings, data_directory)
     settings["io"]["_min_I0_baseline"] = settings["quot"]["track"]["min_I0"]
-    validate_background_condition(settings)
 
     override_path = os.path.join(settings["io"]["analysis_directory"], "settings_override.yaml")
     if os.path.exists(override_path) and not force:

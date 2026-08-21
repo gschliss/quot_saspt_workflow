@@ -60,31 +60,11 @@ def _run_conditionwise_slowSPT(condition: str, settings: dict) -> None:
     ``plotting_pkls/<condition>.pkl`` purely so the Snakemake DAG has the
     output file it expects; :func:`~core.aggregate.run_aggregate` skips
     conditions whose PKL looks like this.
-
-    If ``settings['survival']['background_condition']`` is set (and this
-    isn't that condition), also writes a background-corrected companion
-    curve -- see :func:`~core.plots.plot_survival_background_corrected`.
     """
     traj_csvs = sorted(
         glob.glob(os.path.join(settings["io"]["traj_directory"], f"{condition}*_traj.csv"))
     )
     plots.plot_survival_kaplan_meier(traj_csvs, settings, condition, showPlot=False)
-
-    background_condition = settings["survival"]["background_condition"]
-    if background_condition is not None and condition != background_condition:
-        background_traj_csvs = sorted(
-            glob.glob(os.path.join(settings["io"]["traj_directory"], f"{background_condition}*_traj.csv"))
-        )
-        if background_traj_csvs:
-            plots.plot_survival_background_corrected(
-                traj_csvs, background_traj_csvs, settings, condition, background_condition,
-                showPlot=False,
-            )
-        else:
-            print(
-                f"  [survival corrected] background condition {background_condition!r} has "
-                f"no _traj.csv files; skipping correction for {condition}"
-            )
 
     plotting_pkl_dir = os.path.join(settings["io"]["plot_directory"], "plotting_pkls")
     os.makedirs(plotting_pkl_dir, exist_ok=True)
