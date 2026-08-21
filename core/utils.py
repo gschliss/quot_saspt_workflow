@@ -247,67 +247,6 @@ def prepend_metadata_header(path: str, settings: dict, source: str | None = None
 
 
 # ---------------------------------------------------------------------------
-# Background-condition matching (survival correction)
-# ---------------------------------------------------------------------------
-
-def condition_matches_background(condition: str, background_condition: str) -> bool:
-    """True if *condition* is the configured background condition.
-
-    Prefers an exact match on the condition's own ``send=`` metadata tag
-    (this project's per-construct identity tag, e.g. ``send=pGS322`` in
-    ``send=pGS322_rec=cGS1001_..._int=2p500``) when present, so a background
-    name that happens to be a substring of an unrelated construct's name
-    can't cross-match. Falls back to a plain substring match for datasets
-    that don't use ``send=`` tags.
-    """
-    send = extract_metadata(condition, ["send"]).get("send")
-    if send is not None:
-        return send == background_condition
-    return background_condition in condition
-
-
-def resolve_background_traj_csvs(
-    settings: dict, reference_condition: str, background_condition: str
-) -> tuple[str | None, list[str]]:
-    """Find the ``_traj.csv`` files for *background_condition*, restricted to
-    the same imaging interval (``int=`` tag) as *reference_condition* when
-    both carry one -- background contamination measured under one frame
-    interval isn't comparable, frame-index for frame-index, to a survival
-    curve computed under a different one.
-
-    Returns ``(matched_condition_label, traj_csvs)`` -- *matched_condition_label*
-    is the full discovered condition string that matched (suitable as a plot
-    label), or ``(None, [])`` if nothing matched.
-    """
-    grouped = group_files_by_metadata(settings["io"]["data_directory"])
-    ref_interval = extract_metadata(reference_condition, ["int"]).get("int")
-
-    candidates = []
-    for cond, nd2_files in grouped.items():
-        if not condition_matches_background(cond, background_condition):
-            continue
-        if ref_interval is not None and extract_metadata(cond, ["int"]).get("int") != ref_interval:
-            continue
-        candidates.append((cond, nd2_files))
-
-    if not candidates:
-        return None, []
-    if len(candidates) > 1:
-        print(
-            f"  [survival corrected] multiple conditions match background "
-            f"{background_condition!r} for interval {ref_interval!r}: "
-            f"{[c for c, _ in candidates]} -- using {candidates[0][0]!r}"
-        )
-
-    matched_condition, nd2_files = candidates[0]
-    traj_csvs = [
-        os.path.join(settings["io"]["traj_directory"], os.path.splitext(f)[0] + "_traj.csv")
-        for f in nd2_files
-    ]
-    return matched_condition, sorted(f for f in traj_csvs if os.path.exists(f))
-
-
-# ---------------------------------------------------------------------------
 # Statistics helpers
 # ---------------------------------------------------------------------------
 
