@@ -194,7 +194,14 @@ def publish_run_report(settings: dict) -> str | None:
     try:
         with tempfile.TemporaryDirectory(dir=os.environ.get("SCRATCH")) as tmp:
             clone_dir = os.path.join(tmp, "sptLanding")
-            _git("clone", "--depth", "1", "--branch", _REPO_BRANCH, _REPO_URL, clone_dir, cwd=tmp)
+            # Full clone (no --depth 1): the fetch/rebase retry loop below
+            # needs real shared history with origin to rebase onto when a
+            # concurrent sweep member's push landed first -- a shallow clone
+            # has no merge-base to rebase against, so the retry's push kept
+            # failing the same way every attempt (see incident notes,
+            # 2026-08-25: q=8/9/10 all lost the publish race to q=15 and
+            # never recovered).
+            _git("clone", "--branch", _REPO_BRANCH, _REPO_URL, clone_dir, cwd=tmp)
 
             report_abs_dir = os.path.join(clone_dir, report_rel_dir)
             pdf_abs_dir = os.path.join(report_abs_dir, "pdfs")
